@@ -69,8 +69,13 @@ def make_wrapper(work: Path) -> tuple[Path, str]:
     w = work / "rsh.py"
     log = work / "rsh.log"
     trace = work / "rs.trace"
+    # IMPORTANT: Cygwin (cwrsync) creates pipes with FILE_FLAG_OVERLAPPED.  A
+    # native Windows process (rsync-rs.exe) calling ReadFile on such a handle
+    # gets ERROR_INVALID_PARAMETER (87).  We bridge bytes via threads between
+    # the inherited Cygwin pipes (sys.stdin/sys.stdout) and a fresh pair of
+    # native pipes provided by subprocess.PIPE.
     w.write_text(
-        "import os, sys, subprocess, datetime\n"
+        "import os, sys, subprocess, threading, datetime\n"
         f"LOG = r'{log}'\n"
         f"RS  = r'{os.environ.get('RSYNC_RS', '')}'\n"
         f"TRACE = r'{trace}'\n"
@@ -78,15 +83,38 @@ def make_wrapper(work: Path) -> tuple[Path, str]:
         "    f.write(f'[{datetime.datetime.now().isoformat()}] argv={sys.argv!r}\\n')\n"
         "args = list(sys.argv[2:])\n"
         "if RS:\n"
-        "    args[0] = RS  # force native rsync-rs.exe path; ignore path-mangled --rsync-path\n"
+        "    args[0] = RS\n"
         "with open(LOG, 'a', encoding='utf-8') as f:\n"
         "    f.write(f'  exec={args!r}\\n')\n"
         "env = os.environ.copy()\n"
         "env['RSYNC_RS_TRACE'] = TRACE\n"
-        "# subprocess.run keeps stdio inherited cleanly on Windows where execvp\n"
-        "# is non-atomic and may corrupt handle state.\n"
-        "p = subprocess.run(args, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr, env=env)\n"
-        "sys.exit(p.returncode)\n",
+        "p = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,\n"
+        "                     stderr=sys.stderr, env=env, bufsize=0)\n"
+        "in_fd  = sys.stdin.buffer.raw if hasattr(sys.stdin, 'buffer') else sys.stdin\n"
+        "out_fd = sys.stdout.buffer.raw if hasattr(sys.stdout, 'buffer') else sys.stdout\n"
+        "def pump(src, dst, label):\n"
+        "    try:\n"
+        "        while True:\n"
+        "            buf = src.read(65536)\n"
+        "            if not buf:\n"
+        "                break\n"
+        "            dst.write(buf)\n"
+        "            try: dst.flush()\n"
+        "            except Exception: pass\n"
+        "    except Exception as e:\n"
+        "        with open(LOG, 'a', encoding='utf-8') as f:\n"
+        "            f.write(f'  pump {label} err: {e}\\n')\n"
+        "    finally:\n"
+        "        try: dst.close()\n"
+        "        except Exception: pass\n"
+        "t1 = threading.Thread(target=pump, args=(in_fd, p.stdin, 'in->child'), daemon=True)\n"
+        "t2 = threading.Thread(target=pump, args=(p.stdout, out_fd, 'child->out'), daemon=True)\n"
+        "t1.start(); t2.start()\n"
+        "rc = p.wait()\n"
+        "t2.join(timeout=5)\n"
+        "with open(LOG, 'a', encoding='utf-8') as f:\n"
+        "    f.write(f'  child exit rc={rc}\\n')\n"
+        "sys.exit(rc)\n",
         encoding="utf-8",
     )
     py = sys.executable or shutil.which("python") or shutil.which("python3")
