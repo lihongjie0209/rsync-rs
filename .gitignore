@@ -1,0 +1,3 @@
+/target
+tests/regress/__pycache__/
+**/*.pyc

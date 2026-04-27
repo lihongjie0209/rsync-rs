@@ -1,0 +1,13 @@
+version: "3.8"
+services:
+  test-runner:
+    build:
+      context: .
+      target: test
+    container_name: rsync-test-runner
+    volumes:
+      - ./tests:/tests:ro
+    environment:
+      - RSYNC_C_BIN=rsync
+      - RSYNC_RUST_BIN=rsync-rs
+    command: bash /tests/run_compat_tests.sh
