@@ -58,15 +58,27 @@ def hash_tree(root: Path) -> dict[str, str]:
 
 def make_wrapper(work: Path) -> tuple[Path, str]:
     """A tiny rsh-replacement script.  rsync invokes it as
-       wrapper <host> <remote-cmd...>; we simply exec the remote command,
-       discarding the bogus host. Implemented in Python for portability.
+       wrapper <host> <remote-cmd...>; we replace argv[0] (typically the C
+       rsync's view of `--rsync-path=...`, which MSYS may have path-translated)
+       with the canonical Windows-native rsync-rs.exe from $RSYNC_RS, then
+       exec the rest. argv is appended to a log file for failure triage.
 
-    Returns (path, rsh_command) where rsh_command is the `-e` value rsync
-    will split on whitespace; we keep it to "python_exe wrapper.py"."""
+    Returns (path, rsh_command). The `-e` value is "python_exe wrapper.py";
+    rsync splits on whitespace per shell-quoting rules.
+    """
     w = work / "rsh.py"
+    log = work / "rsh.log"
     w.write_text(
-        "import os, sys\n"
-        "args = sys.argv[2:]\n"
+        "import os, sys, datetime\n"
+        f"LOG = r'{log}'\n"
+        f"RS  = r'{os.environ.get('RSYNC_RS', '')}'\n"
+        "with open(LOG, 'a', encoding='utf-8') as f:\n"
+        "    f.write(f'[{datetime.datetime.now().isoformat()}] argv={sys.argv!r}\\n')\n"
+        "args = list(sys.argv[2:])\n"
+        "if RS:\n"
+        "    args[0] = RS  # force native rsync-rs.exe path; ignore path-mangled --rsync-path\n"
+        "with open(LOG, 'a', encoding='utf-8') as f:\n"
+        "    f.write(f'  exec={args!r}\\n')\n"
         "os.execvp(args[0], args)\n",
         encoding="utf-8",
     )
@@ -92,11 +104,14 @@ def populate_src(src: Path) -> None:
 
 
 def assert_match(label: str, src: Path, dst: Path,
-                 cp: subprocess.CompletedProcess) -> None:
+                 cp: subprocess.CompletedProcess,
+                 rsh_log: Path | None = None) -> None:
     if cp.returncode != 0:
         print(f"FAIL {label}: exit={cp.returncode}")
         print("STDOUT:\n" + cp.stdout)
         print("STDERR:\n" + cp.stderr)
+        if rsh_log is not None and rsh_log.exists():
+            print("RSH-LOG:\n" + rsh_log.read_text(encoding="utf-8", errors="replace"))
         raise SystemExit(2)
     sh = hash_tree(src)
     dh = hash_tree(dst)
@@ -135,6 +150,7 @@ def main() -> int:
     work = Path(tempfile.mkdtemp(prefix="rsync-rs-winterop-"))
     try:
         _wrapper, rsh = make_wrapper(work)
+        rsh_log = work / "rsh.log"
 
         # Scenario 1: C rsync pushes -> rsync-rs receives
         print("\n[scenario] C-push -> rsync-rs receive")
@@ -146,7 +162,7 @@ def main() -> int:
             f"{winpath_to_msys(str(s1_src))}/",
             f"dummyhost:{winpath_native(str(s1_dst))}/",
         ])
-        assert_match("C-push", s1_src, s1_dst, cp)
+        assert_match("C-push", s1_src, s1_dst, cp, rsh_log)
 
         # Scenario 2: C rsync pulls <- rsync-rs sends
         print("\n[scenario] C-pull <- rsync-rs send")
@@ -158,7 +174,7 @@ def main() -> int:
             f"dummyhost:{winpath_native(str(s2_src))}/",
             f"{winpath_to_msys(str(s2_dst))}/",
         ])
-        assert_match("C-pull", s2_src, s2_dst, cp)
+        assert_match("C-pull", s2_src, s2_dst, cp, rsh_log)
 
         # Scenario 3: rsync-rs <-> rsync-rs (self loopback)
         print("\n[scenario] rsync-rs self-loopback (push)")
@@ -170,7 +186,7 @@ def main() -> int:
             f"{winpath_native(str(s3_src))}/",
             f"dummyhost:{winpath_native(str(s3_dst))}/",
         ])
-        assert_match("rs-self-push", s3_src, s3_dst, cp)
+        assert_match("rs-self-push", s3_src, s3_dst, cp, rsh_log)
 
         print("\nAll Windows interop scenarios passed.")
         return 0
