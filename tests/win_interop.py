@@ -129,8 +129,8 @@ def main() -> int:
     try:
         _wrapper, rsh = make_wrapper(work)
 
-        # ── Scenario 1: C rsync pushes → rsync-rs receives ────────────────
-        print("\n[scenario] C-push → rsync-rs receive")
+        # Scenario 1: C rsync pushes -> rsync-rs receives
+        print("\n[scenario] C-push -> rsync-rs receive")
         s1_src = work / "s1_src"; s1_dst = work / "s1_dst"
         populate_src(s1_src)
         cp = run([
@@ -141,8 +141,8 @@ def main() -> int:
         ])
         assert_match("C-push", s1_src, s1_dst, cp)
 
-        # ── Scenario 2: C rsync pulls ← rsync-rs sends ────────────────────
-        print("\n[scenario] C-pull ← rsync-rs send")
+        # Scenario 2: C rsync pulls <- rsync-rs sends
+        print("\n[scenario] C-pull <- rsync-rs send")
         s2_src = work / "s2_src"; s2_dst = work / "s2_dst"
         populate_src(s2_src)
         cp = run([
@@ -153,7 +153,7 @@ def main() -> int:
         ])
         assert_match("C-pull", s2_src, s2_dst, cp)
 
-        # ── Scenario 3: rsync-rs ↔ rsync-rs (self loopback) ───────────────
+        # Scenario 3: rsync-rs <-> rsync-rs (self loopback)
         print("\n[scenario] rsync-rs self-loopback (push)")
         s3_src = work / "s3_src"; s3_dst = work / "s3_dst"
         populate_src(s3_src)
