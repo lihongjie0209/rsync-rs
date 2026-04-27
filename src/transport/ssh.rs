@@ -40,7 +40,15 @@ impl SshTransport {
             None => host.to_owned(),
         };
 
-        let mut cmd = Command::new(ssh_cmd);
+        // C rsync's `-e <command>` is whitespace-split (with simple quote
+        // handling) into program + extra args.  E.g. `-e "ssh -p 2222"` runs
+        // `ssh` with `-p 2222 host …`.  Mirror that behaviour.
+        let parts = shell_split(ssh_cmd);
+        let (program, extra_args) = parts.split_first()
+            .ok_or_else(|| anyhow::anyhow!("empty rsh command"))?;
+
+        let mut cmd = Command::new(program);
+        cmd.args(extra_args);
         cmd.args(ssh_args);
         cmd.arg(&destination);
 
@@ -88,5 +96,100 @@ pub struct SshChild {
 impl SshChild {
     pub fn wait(mut self) -> Result<std::process::ExitStatus> {
         self.child.wait().context("waiting for ssh child")
+    }
+}
+
+/// Split a shell-style command string into argv tokens.
+///
+/// Supports single quotes ('…' — literal), double quotes ("…" — also literal
+/// for our purposes), and backslash escaping outside of single quotes. This is
+/// intentionally simpler than POSIX `sh` quoting but matches what C rsync's
+/// own `-e` parser accepts in practice (split on unquoted whitespace).
+fn shell_split(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escape = false;
+    let mut has_token = false;
+    for ch in s.chars() {
+        if escape {
+            cur.push(ch);
+            escape = false;
+            has_token = true;
+            continue;
+        }
+        if ch == '\\' && !in_single && !in_double {
+            escape = true;
+            continue;
+        }
+        if ch == '\'' && !in_double {
+            in_single = !in_single;
+            has_token = true;
+            continue;
+        }
+        if ch == '"' && !in_single {
+            in_double = !in_double;
+            has_token = true;
+            continue;
+        }
+        if ch.is_whitespace() && !in_single && !in_double {
+            if has_token {
+                out.push(std::mem::take(&mut cur));
+                has_token = false;
+            }
+            continue;
+        }
+        cur.push(ch);
+        has_token = true;
+    }
+    if has_token {
+        out.push(cur);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_split;
+
+    #[test]
+    fn single_word() {
+        assert_eq!(shell_split("ssh"), vec!["ssh"]);
+    }
+
+    #[test]
+    fn two_words() {
+        assert_eq!(shell_split("ssh -p2222"), vec!["ssh", "-p2222"]);
+    }
+
+    #[test]
+    fn quoted_args() {
+        assert_eq!(
+            shell_split(r#"ssh -o "User=root" -i 'my key.pem'"#),
+            vec!["ssh", "-o", "User=root", "-i", "my key.pem"],
+        );
+    }
+
+    #[test]
+    fn backslash_escape() {
+        assert_eq!(
+            shell_split(r"ssh -i my\ key.pem"),
+            vec!["ssh", "-i", "my key.pem"],
+        );
+    }
+
+    #[test]
+    fn empty_arg() {
+        assert_eq!(shell_split(""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn windows_path() {
+        // Windows-style program path with embedded space (quoted)
+        assert_eq!(
+            shell_split(r#""C:\Program Files\OpenSSH\ssh.exe" -p 22"#),
+            vec![r"C:\Program Files\OpenSSH\ssh.exe", "-p", "22"],
+        );
     }
 }

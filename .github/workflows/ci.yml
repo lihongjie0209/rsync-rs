@@ -24,6 +24,38 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --release --quiet
 
+  windows-smoke:
+    name: Windows smoke (${{ matrix.flavor }})
+    needs: test
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [native, interop]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-smoke-${{ matrix.flavor }}
+      - name: Build release
+        run: cargo build --release --locked
+      - name: Native --local smoke
+        if: matrix.flavor == 'native'
+        run: python tests\win_smoke.py
+      - name: Install C rsync via Chocolatey
+        if: matrix.flavor == 'interop'
+        shell: pwsh
+        run: |
+          choco install rsync --no-progress -y --version=6.2.7
+          rsync --version
+      - name: Linux↔Windows interop smoke (C rsync ↔ rsync-rs)
+        if: matrix.flavor == 'interop'
+        shell: bash
+        env:
+          RSYNC_RS: ${{ github.workspace }}\target\release\rsync-rs.exe
+        run: python tests/win_interop.py
+
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -104,7 +136,7 @@ jobs:
   release:
     name: Publish release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, build]
+    needs: [test, build, windows-smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: write
