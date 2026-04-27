@@ -112,11 +112,18 @@ def assert_match(label: str, src: Path, dst: Path,
 
 
 def winpath_to_msys(p: str) -> str:
-    """`C:\\foo\\bar` -> `/c/foo/bar` for MSYS-rsync (Chocolatey rsync)."""
+    """`C:\\foo\\bar` -> `/c/foo/bar` for MSYS-rsync (Chocolatey rsync) local args."""
     p = str(p).replace("\\", "/")
     if len(p) >= 2 and p[1] == ":":
         p = "/" + p[0].lower() + p[2:]
     return p
+
+
+def winpath_native(p: str) -> str:
+    """`C:\\foo\\bar` -> `C:/foo/bar` -- forward slashes, but native drive form
+    so that the Windows-native rsync-rs receiver can open it. cwrsync passes
+    remote-side paths through verbatim, so this string survives intact."""
+    return str(p).replace("\\", "/")
 
 
 def main() -> int:
@@ -137,7 +144,7 @@ def main() -> int:
             rc, "-r", "-e", rsh,
             f"--rsync-path={rs}",
             f"{winpath_to_msys(str(s1_src))}/",
-            f"dummyhost:{winpath_to_msys(str(s1_dst))}/",
+            f"dummyhost:{winpath_native(str(s1_dst))}/",
         ])
         assert_match("C-push", s1_src, s1_dst, cp)
 
@@ -148,7 +155,7 @@ def main() -> int:
         cp = run([
             rc, "-r", "-e", rsh,
             f"--rsync-path={rs}",
-            f"dummyhost:{winpath_to_msys(str(s2_src))}/",
+            f"dummyhost:{winpath_native(str(s2_src))}/",
             f"{winpath_to_msys(str(s2_dst))}/",
         ])
         assert_match("C-pull", s2_src, s2_dst, cp)
@@ -160,8 +167,8 @@ def main() -> int:
         cp = run([
             rs, "-r", "-e", rsh,
             f"--rsync-path={rs}",
-            f"{s3_src}{os.sep}",
-            f"dummyhost:{s3_dst}{os.sep}",
+            f"{winpath_native(str(s3_src))}/",
+            f"dummyhost:{winpath_native(str(s3_dst))}/",
         ])
         assert_match("rs-self-push", s3_src, s3_dst, cp)
 
