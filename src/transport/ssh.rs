@@ -110,17 +110,25 @@ fn shell_split(s: &str) -> Vec<String> {
     let mut cur = String::new();
     let mut in_single = false;
     let mut in_double = false;
-    let mut escape = false;
     let mut has_token = false;
-    for ch in s.chars() {
-        if escape {
-            cur.push(ch);
-            escape = false;
-            has_token = true;
-            continue;
-        }
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        // Backslash only acts as an escape when followed by one of the
+        // metacharacters we recognise (space, quote, backslash). This keeps
+        // Windows paths like `C:\Users\foo` intact while still allowing
+        // POSIX-style escapes such as `my\ file`.
         if ch == '\\' && !in_single && !in_double {
-            escape = true;
+            if let Some(&next) = chars.peek() {
+                if next == ' ' || next == '\t' || next == '"' || next == '\'' || next == '\\' {
+                    cur.push(next);
+                    chars.next();
+                    has_token = true;
+                    continue;
+                }
+            }
+            // Not a recognised escape: keep the backslash literal.
+            cur.push('\\');
+            has_token = true;
             continue;
         }
         if ch == '\'' && !in_double {
@@ -176,6 +184,16 @@ mod tests {
         assert_eq!(
             shell_split(r"ssh -i my\ key.pem"),
             vec!["ssh", "-i", "my key.pem"],
+        );
+    }
+
+    #[test]
+    fn windows_unquoted_path_preserved() {
+        // Backslashes in Windows paths must survive when not followed by a
+        // shell metacharacter.
+        assert_eq!(
+            shell_split(r"C:\Python\python.exe C:\tmp\rsh.py"),
+            vec![r"C:\Python\python.exe", r"C:\tmp\rsh.py"],
         );
     }
 
