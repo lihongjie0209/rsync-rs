@@ -70,7 +70,7 @@ def make_wrapper(work: Path) -> tuple[Path, str]:
     log = work / "rsh.log"
     trace = work / "rs.trace"
     w.write_text(
-        "import os, sys, datetime\n"
+        "import os, sys, subprocess, datetime\n"
         f"LOG = r'{log}'\n"
         f"RS  = r'{os.environ.get('RSYNC_RS', '')}'\n"
         f"TRACE = r'{trace}'\n"
@@ -81,8 +81,12 @@ def make_wrapper(work: Path) -> tuple[Path, str]:
         "    args[0] = RS  # force native rsync-rs.exe path; ignore path-mangled --rsync-path\n"
         "with open(LOG, 'a', encoding='utf-8') as f:\n"
         "    f.write(f'  exec={args!r}\\n')\n"
-        "os.environ['RSYNC_RS_TRACE'] = TRACE\n"
-        "os.execvp(args[0], args)\n",
+        "env = os.environ.copy()\n"
+        "env['RSYNC_RS_TRACE'] = TRACE\n"
+        "# subprocess.run keeps stdio inherited cleanly on Windows where execvp\n"
+        "# is non-atomic and may corrupt handle state.\n"
+        "p = subprocess.run(args, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr, env=env)\n"
+        "sys.exit(p.returncode)\n",
         encoding="utf-8",
     )
     py = sys.executable or shutil.which("python") or shutil.which("python3")

@@ -154,11 +154,31 @@ fn protocol_handshake<R: std::io::Read, W: std::io::Write>(
     writer: &mut W,
     am_server: bool,
 ) -> Result<u32> {
+    let trace = std::env::var_os("RSYNC_RS_TRACE").map(std::path::PathBuf::from);
+    let stamp = |s: &str| {
+        if let Some(p) = trace.as_ref() {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+                let _ = writeln!(f, "[handshake] {}", s);
+            }
+        }
+    };
     let local = PROTOCOL_VERSION;
+    stamp(&format!("entering, am_server={} local={}", am_server, local));
     let remote: u32 = if am_server {
-        let v = read_int(reader)? as u32;
-        write_int(writer, local as i32)?;
-        writer.flush().ok();
+        stamp("server: about to read_int");
+        let v = match read_int(reader) {
+            Ok(v) => v as u32,
+            Err(e) => { stamp(&format!("read_int failed: {:#}", e)); return Err(e); }
+        };
+        stamp(&format!("server: read remote={}", v));
+        if let Err(e) = write_int(writer, local as i32) {
+            stamp(&format!("write_int failed: {:#}", e)); return Err(e);
+        }
+        if let Err(e) = writer.flush() {
+            stamp(&format!("flush failed: {} (kind={:?})", e, e.kind()));
+            // mirror existing behaviour: ignore flush err
+        }
         v
     } else {
         write_int(writer, local as i32)?;
