@@ -244,20 +244,32 @@ fn handle_connection(
     write!(writer, "@RSYNCD: OK\n")?;
     writer.flush()?;
 
-    // 5. Read the per-connection argv (one per line, terminated by an empty line).
-    //    We don't yet implement protocol≥30 NUL-mode for daemon args.
-    let mut args: Vec<String> = Vec::new();
-    loop {
-        let mut a = String::new();
-        let n = reader.read_line(&mut a)?;
-        if n == 0 {
-            break;
+    // BufReader may have over-read; we need raw socket access from now on.
+    drop(reader);
+    let mut raw_reader = stream.try_clone()?;
+
+    // 5. Read the per-connection argv.  Protocol ≥ 30 uses NUL-terminated
+    //    args (ending with an empty string == double-NUL).
+    let mut args: Vec<String> = vec!["rsyncd".to_string()];
+    {
+        use std::io::Read;
+        let mut byte = [0u8; 1];
+        let mut cur: Vec<u8> = Vec::new();
+        loop {
+            let n = raw_reader.read(&mut byte)?;
+            if n == 0 {
+                break;
+            }
+            if byte[0] == 0 {
+                if cur.is_empty() {
+                    break;
+                }
+                args.push(String::from_utf8_lossy(&cur).into_owned());
+                cur.clear();
+            } else {
+                cur.push(byte[0]);
+            }
         }
-        let a = a.trim_end_matches(['\n', '\r']).to_string();
-        if a.is_empty() {
-            break;
-        }
-        args.push(a);
     }
 
     // 6. chdir into the module path so relative source paths resolve there.
@@ -267,6 +279,7 @@ fn handle_connection(
     // 7. Build server Options and hand off the socket to run_server_io.
     let mut opts2 = Options {
         server: true,
+        daemon: true,
         sender: args.iter().any(|a| a == "--sender"),
         args: args.clone(),
         ..Options::default()
@@ -279,13 +292,7 @@ fn handle_connection(
     }
     opts2.expand_archive();
 
-    // The reader BufReader wraps a clone of the socket; we now want raw I/O
-    // on the underlying stream.  Drop the BufReader and use the stream
-    // directly for the server protocol.
-    drop(reader);
-    let read_half = stream.try_clone()?;
-    let write_half = stream;
-    let _ = crate::run_server_io(&opts2, read_half, write_half)?;
+    let _ = crate::run_server_io(&opts2, raw_reader, stream)?;
     Ok(())
 }
 

@@ -414,8 +414,14 @@ pub fn run_server_io<R: std::io::Read, W: std::io::Write>(
     let mut reader = crate::io::multiplex::MplexReader::new(raw_reader);
     let mut writer = crate::io::multiplex::MplexWriter::new(raw_writer);
 
-    // Step 1: Protocol version handshake (server reads then writes).
-    let protocol = protocol_handshake(&mut reader, &mut writer, true)?;
+    // Step 1: Protocol version handshake.  In daemon mode (rsync://) the
+    // version was already negotiated textually via "@RSYNCD: NN.S\n" so we
+    // skip the 4-byte exchange here.
+    let protocol = if opts.daemon {
+        PROTOCOL_VERSION as u32
+    } else {
+        protocol_handshake(&mut reader, &mut writer, true)?
+    };
 
     // Step 1b: Parse the bundled flags / argv that the client passed so we
     // know up-front whether compression negotiation will run.  Both server

@@ -633,6 +633,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(unix)]
     #[test]
     fn preserves_symlink() {
         let td = tdir();

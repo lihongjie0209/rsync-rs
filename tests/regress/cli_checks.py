@@ -271,6 +271,56 @@ def check_daemon_module_list() -> Scenario:
     return _make_check("cli__daemon_module_list", fn)
 
 
+def check_daemon_pull_file() -> Scenario:
+    """C rsync pulls a file from rsync-rs --daemon over rsync://."""
+    def fn(ctx: ScenarioContext) -> str | None:
+        import tempfile, time, socket
+        s = socket.socket(); s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]; s.close()
+
+        with tempfile.TemporaryDirectory() as td:
+            mod_dir = Path(td) / "data"; mod_dir.mkdir()
+            (mod_dir / "hello.txt").write_bytes(b"hi from daemon transfer")
+            cfg = Path(td) / "rsyncd.conf"
+            cfg.write_text(
+                f"[data]\n  path = {mod_dir}\n  read only = yes\n"
+            )
+            dst = Path(td) / "out"; dst.mkdir()
+            daemon = subprocess.Popen(
+                [ctx.rsync_rs, "--daemon", "--no-detach",
+                 f"--config={cfg}", f"--port={port}"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                deadline = time.time() + 2.0
+                while time.time() < deadline:
+                    try:
+                        sk = socket.create_connection(("127.0.0.1", port), 0.2)
+                        sk.close(); break
+                    except OSError:
+                        time.sleep(0.05)
+                else:
+                    return "daemon did not start within 2s"
+
+                proc = subprocess.run(
+                    ["rsync", "-a", f"rsync://127.0.0.1:{port}/data/hello.txt",
+                     str(dst / "hello.txt")],
+                    capture_output=True, timeout=10)
+                if proc.returncode != 0:
+                    return (f"rsync exit {proc.returncode}\n"
+                            f"stdout={proc.stdout.decode(errors='replace')}\n"
+                            f"stderr={proc.stderr.decode(errors='replace')}")
+                got = (dst / "hello.txt").read_bytes()
+                want = b"hi from daemon transfer"
+                if got != want:
+                    return f"content mismatch: got={got!r} want={want!r}"
+            finally:
+                daemon.terminate()
+                try: daemon.wait(timeout=2)
+                except subprocess.TimeoutExpired: daemon.kill()
+        return None
+    return _make_check("cli__daemon_pull_file", fn)
+
+
 # ───────────────────────── Aggregator ─────────────────────────────────────
 
 
@@ -286,4 +336,5 @@ def all_cli_checks():
         check_flist_messages(),
         check_error_format(),
         check_daemon_module_list(),
+        check_daemon_pull_file(),
     ]
