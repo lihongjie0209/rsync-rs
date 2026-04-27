@@ -68,10 +68,12 @@ def make_wrapper(work: Path) -> tuple[Path, str]:
     """
     w = work / "rsh.py"
     log = work / "rsh.log"
+    trace = work / "rs.trace"
     w.write_text(
         "import os, sys, datetime\n"
         f"LOG = r'{log}'\n"
         f"RS  = r'{os.environ.get('RSYNC_RS', '')}'\n"
+        f"TRACE = r'{trace}'\n"
         "with open(LOG, 'a', encoding='utf-8') as f:\n"
         "    f.write(f'[{datetime.datetime.now().isoformat()}] argv={sys.argv!r}\\n')\n"
         "args = list(sys.argv[2:])\n"
@@ -79,6 +81,7 @@ def make_wrapper(work: Path) -> tuple[Path, str]:
         "    args[0] = RS  # force native rsync-rs.exe path; ignore path-mangled --rsync-path\n"
         "with open(LOG, 'a', encoding='utf-8') as f:\n"
         "    f.write(f'  exec={args!r}\\n')\n"
+        "os.environ['RSYNC_RS_TRACE'] = TRACE\n"
         "os.execvp(args[0], args)\n",
         encoding="utf-8",
     )
@@ -105,13 +108,16 @@ def populate_src(src: Path) -> None:
 
 def assert_match(label: str, src: Path, dst: Path,
                  cp: subprocess.CompletedProcess,
-                 rsh_log: Path | None = None) -> None:
+                 rsh_log: Path | None = None,
+                 rs_trace: Path | None = None) -> None:
     if cp.returncode != 0:
         print(f"FAIL {label}: exit={cp.returncode}")
         print("STDOUT:\n" + cp.stdout)
         print("STDERR:\n" + cp.stderr)
         if rsh_log is not None and rsh_log.exists():
             print("RSH-LOG:\n" + rsh_log.read_text(encoding="utf-8", errors="replace"))
+        if rs_trace is not None and rs_trace.exists():
+            print("RS-TRACE:\n" + rs_trace.read_text(encoding="utf-8", errors="replace"))
         raise SystemExit(2)
     sh = hash_tree(src)
     dh = hash_tree(dst)
@@ -151,6 +157,7 @@ def main() -> int:
     try:
         _wrapper, rsh = make_wrapper(work)
         rsh_log = work / "rsh.log"
+        rs_trace = work / "rs.trace"
 
         # Scenario 1: C rsync pushes -> rsync-rs receives
         print("\n[scenario] C-push -> rsync-rs receive")
@@ -162,7 +169,7 @@ def main() -> int:
             f"{winpath_to_msys(str(s1_src))}/",
             f"dummyhost:{winpath_native(str(s1_dst))}/",
         ])
-        assert_match("C-push", s1_src, s1_dst, cp, rsh_log)
+        assert_match("C-push", s1_src, s1_dst, cp, rsh_log, rs_trace)
 
         # Scenario 2: C rsync pulls <- rsync-rs sends
         print("\n[scenario] C-pull <- rsync-rs send")
@@ -174,7 +181,7 @@ def main() -> int:
             f"dummyhost:{winpath_native(str(s2_src))}/",
             f"{winpath_to_msys(str(s2_dst))}/",
         ])
-        assert_match("C-pull", s2_src, s2_dst, cp, rsh_log)
+        assert_match("C-pull", s2_src, s2_dst, cp, rsh_log, rs_trace)
 
         # Scenario 3: rsync-rs <-> rsync-rs (self loopback)
         print("\n[scenario] rsync-rs self-loopback (push)")
@@ -186,7 +193,7 @@ def main() -> int:
             f"{winpath_native(str(s3_src))}/",
             f"dummyhost:{winpath_native(str(s3_dst))}/",
         ])
-        assert_match("rs-self-push", s3_src, s3_dst, cp, rsh_log)
+        assert_match("rs-self-push", s3_src, s3_dst, cp, rsh_log, rs_trace)
 
         print("\nAll Windows interop scenarios passed.")
         return 0
