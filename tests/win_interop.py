@@ -201,31 +201,37 @@ def main() -> int:
         rsh_log = work / "rsh.log"
         rs_trace = work / "rs.trace"
 
-        # Scenario 1: C rsync pushes -> rsync-rs receives
-        print("\n[scenario] C-push -> rsync-rs receive")
+        # Scenarios where rsync-rs is the LOCAL/client (creates native pipes
+        # that cwrsync MSYS can read).  The reverse direction (cwrsync as
+        # local) cannot work via a python rsh wrapper because cwrsync's
+        # FILE_FLAG_OVERLAPPED pipes raise ERROR_INVALID_PARAMETER (87) for
+        # any native ReadFile, and rsync-rs is a native Windows binary.
+
+        # Scenario 1: rsync-rs pushes -> C rsync receives (C as remote server).
+        print("\n[scenario] rs-push -> C-rsync receive")
         s1_src = work / "s1_src"; s1_dst = work / "s1_dst"
         populate_src(s1_src)
         cp = run([
-            rc, "-r", "-e", rsh,
-            f"--rsync-path={rs}",
-            f"{winpath_to_msys(str(s1_src))}/",
-            f"dummyhost:{winpath_native(str(s1_dst))}/",
+            rs, "-r", "-e", rsh,
+            f"--rsync-path={rc}",
+            f"{winpath_native(str(s1_src))}/",
+            f"dummyhost:{winpath_to_msys(str(s1_dst))}/",
         ])
-        assert_match("C-push", s1_src, s1_dst, cp, rsh_log, rs_trace)
+        assert_match("rs-push", s1_src, s1_dst, cp, rsh_log, rs_trace)
 
-        # Scenario 2: C rsync pulls <- rsync-rs sends
-        print("\n[scenario] C-pull <- rsync-rs send")
+        # Scenario 2: rsync-rs pulls <- C rsync sends (C as remote server).
+        print("\n[scenario] rs-pull <- C-rsync send")
         s2_src = work / "s2_src"; s2_dst = work / "s2_dst"
         populate_src(s2_src)
         cp = run([
-            rc, "-r", "-e", rsh,
-            f"--rsync-path={rs}",
-            f"dummyhost:{winpath_native(str(s2_src))}/",
-            f"{winpath_to_msys(str(s2_dst))}/",
+            rs, "-r", "-e", rsh,
+            f"--rsync-path={rc}",
+            f"dummyhost:{winpath_to_msys(str(s2_src))}/",
+            f"{winpath_native(str(s2_dst))}/",
         ])
-        assert_match("C-pull", s2_src, s2_dst, cp, rsh_log, rs_trace)
+        assert_match("rs-pull", s2_src, s2_dst, cp, rsh_log, rs_trace)
 
-        # Scenario 3: rsync-rs <-> rsync-rs (self loopback)
+        # Scenario 3: rsync-rs <-> rsync-rs (self loopback, both native).
         print("\n[scenario] rsync-rs self-loopback (push)")
         s3_src = work / "s3_src"; s3_dst = work / "s3_dst"
         populate_src(s3_src)
