@@ -6,11 +6,12 @@
 use std::io::Write;
 
 use crate::io::varint::{
-    write_byte, write_int, write_varlong, write_varint, write_varint30,
+    write_byte, write_int, write_shortint, write_varlong, write_varint, write_varint30,
 };
 use crate::protocol::constants::{
-    XMIT_EXTENDED_FLAGS, XMIT_LONG_NAME, XMIT_MOD_NSEC, XMIT_SAME_GID, XMIT_SAME_MODE,
-    XMIT_SAME_NAME, XMIT_SAME_TIME, XMIT_SAME_UID,
+    CF_INC_RECURSE, CF_VARINT_FLIST_FLAGS, XMIT_EXTENDED_FLAGS, XMIT_IO_ERROR_ENDLIST,
+    XMIT_LONG_NAME, XMIT_MOD_NSEC, XMIT_SAME_GID, XMIT_SAME_MODE, XMIT_SAME_NAME, XMIT_SAME_TIME,
+    XMIT_SAME_UID,
 };
 use crate::protocol::types::{FileInfo, FileList, FileType};
 
@@ -41,6 +42,7 @@ pub fn send_file_list<W: Write>(
         checksum_len,
         io_error,
         Preserve { uid: true, gid: true, times: true, devices: true },
+        CF_VARINT_FLIST_FLAGS,
     )
 }
 
@@ -51,7 +53,12 @@ pub fn send_file_list_ex<W: Write>(
     checksum_len: usize,
     io_error: i32,
     preserve: Preserve,
+    compat_flags: u32,
 ) -> anyhow::Result<()> {
+    let varint_flags = (compat_flags & CF_VARINT_FLIST_FLAGS) != 0;
+    let inc_recurse = (compat_flags & CF_INC_RECURSE) != 0;
+    let use_safe_inc_flist = protocol >= 31;
+
     let order: Vec<usize> = if flist.sorted.is_empty() {
         (0..flist.files.len()).collect()
     } else {
@@ -61,36 +68,39 @@ pub fn send_file_list_ex<W: Write>(
     let mut prev: Option<&FileInfo> = None;
     for &idx in &order {
         let fi = &flist.files[idx];
-        send_file_entry(w, fi, prev, protocol, checksum_len, preserve)?;
+        send_file_entry(w, fi, prev, protocol, checksum_len, preserve, varint_flags)?;
         prev = Some(fi);
     }
 
-    // End-of-list marker: a single 0-valued flag varint.
-    crate::rdebug!("[flist-send] writing end-of-list marker (varint 0)");
-    write_varint(w, 0)?;
-
-    // End-of-list trailer for protocol >= 30 with xfer_flags_as_varint
-    // (flist.c::write_end_of_flist:2077-2087). Order:
-    //   1. varint(0)            — already written above as the end marker
-    //   2. varint(io_error)     — inline io_error (this branch only)
-    //   3. send_id_lists        — uid list (varint30-terminated by 0)
-    //   4.                        gid list (varint30-terminated by 0)
-    // For protocol < 30, only a 4-byte int io_error is written and there
-    // is no inline id-list block (id lists are sent later via a
-    // different path / not at all for legacy modes).
-    if protocol >= 30 {
+    // End-of-list trailer (flist.c::write_end_of_flist:2077-2087).
+    crate::rdebug!(
+        "[flist-send] writing end-of-list (varint_flags={}, inc_recurse={}, use_safe_inc_flist={})",
+        varint_flags,
+        inc_recurse,
+        use_safe_inc_flist
+    );
+    if varint_flags {
+        write_varint(w, 0)?;
         write_varint(w, io_error)?;
-        // C's recv_id_list (uidlist.c:460) only reads the uid list when
-        // `preserve_uid` is set, and the gid list when `preserve_gid` is set.
-        // (Inc_recurse is not enabled by our server, so the non-inc_recurse path
-        //  in flist.c:2727 always calls recv_id_list.) Match that gating exactly.
+    } else if use_safe_inc_flist || io_error != 0 {
+        // Send the io_error inline via the EXTENDED|IO_ERROR_ENDLIST shortint.
+        write_shortint(w, (XMIT_EXTENDED_FLAGS | XMIT_IO_ERROR_ENDLIST) as u16)?;
+        write_varint(w, io_error)?;
+    } else {
+        write_byte(w, 0)?;
+    }
+
+    // Trailing uid/gid name lists (flist.c:2513). With inc_recurse=1 the
+    // sender does NOT append id-lists at the end of the initial flist; names
+    // are sent inline per-entry via XMIT_USER_NAME_FOLLOWS instead.
+    if !inc_recurse && protocol >= 30 {
         if preserve.uid {
             write_varint30(w, 0)?;
         }
         if preserve.gid {
             write_varint30(w, 0)?;
         }
-    } else {
+    } else if protocol < 30 {
         write_int(w, io_error)?;
     }
 
@@ -107,6 +117,7 @@ fn send_file_entry<W: Write>(
     protocol: u32,
     checksum_len: usize,
     preserve: Preserve,
+    varint_flags: bool,
 ) -> anyhow::Result<()> {
     let fname = fi.path();
     let prev_name = prev.map(|p| p.path()).unwrap_or_default();
@@ -174,7 +185,17 @@ fn send_file_entry<W: Write>(
     }
 
     // ── write flags ───────────────────────────────────────────────────────
-    write_varint(w, xflags as i32)?;
+    if varint_flags {
+        write_varint(w, xflags as i32)?;
+    } else {
+        // flist.c:551-558 — byte/shortint encoding gated by high bits.
+        if (xflags & 0xFF00) != 0 {
+            xflags |= XMIT_EXTENDED_FLAGS;
+            write_shortint(w, xflags as u16)?;
+        } else {
+            write_byte(w, (xflags & 0xFF) as u8)?;
+        }
+    }
 
     // ── name ─────────────────────────────────────────────────────────────
     if xflags & XMIT_SAME_NAME != 0 {

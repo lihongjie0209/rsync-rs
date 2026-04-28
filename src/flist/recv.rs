@@ -10,8 +10,9 @@ use crate::io::varint::{
     read_byte, read_int, read_varlong, read_varint, read_varint30,
 };
 use crate::protocol::constants::{
-    XMIT_LONG_NAME, XMIT_MOD_NSEC, XMIT_SAME_GID, XMIT_SAME_MODE, XMIT_SAME_NAME,
-    XMIT_SAME_TIME, XMIT_SAME_UID,
+    CF_INC_RECURSE, CF_VARINT_FLIST_FLAGS, XMIT_EXTENDED_FLAGS, XMIT_GROUP_NAME_FOLLOWS,
+    XMIT_IO_ERROR_ENDLIST, XMIT_LONG_NAME, XMIT_MOD_NSEC, XMIT_SAME_GID, XMIT_SAME_MODE,
+    XMIT_SAME_NAME, XMIT_SAME_TIME, XMIT_SAME_UID, XMIT_USER_NAME_FOLLOWS,
 };
 use crate::protocol::types::{FileInfo, FileList, FileType};
 
@@ -24,7 +25,7 @@ pub fn recv_file_list<R: Read>(
     protocol: u32,
     checksum_len: usize,
 ) -> anyhow::Result<FileList> {
-    recv_file_list_ex(r, protocol, checksum_len, true, true)
+    recv_file_list_ex(r, protocol, checksum_len, true, true, CF_VARINT_FLIST_FLAGS)
 }
 
 /// Same as [`recv_file_list`] but with explicit gating of the trailing
@@ -36,45 +37,70 @@ pub fn recv_file_list_ex<R: Read>(
     checksum_len: usize,
     preserve_uid: bool,
     preserve_gid: bool,
+    compat_flags: u32,
 ) -> anyhow::Result<FileList> {
+    let varint_flags = (compat_flags & CF_VARINT_FLIST_FLAGS) != 0;
+    let inc_recurse = (compat_flags & CF_INC_RECURSE) != 0;
     let mut flist = FileList::new();
     let mut prev: Option<FileInfo> = None;
 
     loop {
-        let xflags = read_varint(r)? as u32;
+        let xflags = if varint_flags {
+            read_varint(r)? as u32
+        } else {
+            // flist.c:2624-2640 — byte/shortint xfer flags.
+            let mut flags = read_byte(r)? as u32;
+            if flags == 0 {
+                0
+            } else {
+                if protocol >= 28 && (flags & XMIT_EXTENDED_FLAGS) != 0 {
+                    flags |= (read_byte(r)? as u32) << 8;
+                }
+                if flags == (XMIT_EXTENDED_FLAGS | XMIT_IO_ERROR_ENDLIST) {
+                    // End-of-flist with inline io_error.
+                    let _io_error = read_varint(r)?;
+                    0
+                } else {
+                    flags
+                }
+            }
+        };
+
         if xflags == 0 {
-            // End-of-list. For protocol 30+ the sender now writes uid/gid
-            // name lists (each terminated by varint(0)) and does NOT write
-            // an inline io_error (any I/O error is sent later via
-            // MSG_IO_ERROR through the mux channel). For protocol <30 a
-            // 4-byte io_error int is written here instead.
-            if protocol >= 30 {
-                // With xfer_flags_as_varint (CF_VARINT_FLIST_FLAGS) the end
-                // marker is followed by an inline io_error varint
-                // (flist.c::write_end_of_flist:2079-2081), THEN the uid+gid
-                // name lists. Each id list ends with varint30(0).
+            // End-of-list. With xfer_flags_as_varint, the io_error follows
+            // inline (already-consumed for non-varint above when ENDLIST bit).
+            if varint_flags {
                 let _io_error = read_varint(r)?;
+            }
+            // Trailing id-name lists. Skipped when inc_recurse is on.
+            if !inc_recurse && protocol >= 30 {
                 if preserve_uid {
-                    // uid list
                     loop {
                         let id = read_varint30(r)? as u32;
-                        if id == 0 { break; }
+                        if id == 0 {
+                            break;
+                        }
                         let len = read_byte(r)? as usize;
                         let mut name = vec![0u8; len];
-                        if len > 0 { r.read_exact(&mut name)?; }
+                        if len > 0 {
+                            r.read_exact(&mut name)?;
+                        }
                     }
                 }
                 if preserve_gid {
-                    // gid list
                     loop {
                         let id = read_varint30(r)? as u32;
-                        if id == 0 { break; }
+                        if id == 0 {
+                            break;
+                        }
                         let len = read_byte(r)? as usize;
                         let mut name = vec![0u8; len];
-                        if len > 0 { r.read_exact(&mut name)?; }
+                        if len > 0 {
+                            r.read_exact(&mut name)?;
+                        }
                     }
                 }
-            } else {
+            } else if protocol < 30 {
                 let _io_error = read_int(r)?;
             }
             break;
@@ -171,7 +197,16 @@ fn recv_file_entry_inner<R: Read>(
     let uid = if xflags & XMIT_SAME_UID != 0 {
         prev.map(|p| p.uid).unwrap_or(0)
     } else if protocol >= 30 {
-        read_varint(r)? as u32
+        let id = read_varint(r)? as u32;
+        if xflags & XMIT_USER_NAME_FOLLOWS != 0 {
+            // Inline user name follows: 1-byte length + name bytes.
+            let len = read_byte(r)? as usize;
+            let mut name = vec![0u8; len];
+            if len > 0 {
+                r.read_exact(&mut name)?;
+            }
+        }
+        id
     } else {
         read_int(r)? as u32
     };
@@ -179,7 +214,15 @@ fn recv_file_entry_inner<R: Read>(
     let gid = if xflags & XMIT_SAME_GID != 0 {
         prev.map(|p| p.gid).unwrap_or(0)
     } else if protocol >= 30 {
-        read_varint(r)? as u32
+        let id = read_varint(r)? as u32;
+        if xflags & XMIT_GROUP_NAME_FOLLOWS != 0 {
+            let len = read_byte(r)? as usize;
+            let mut name = vec![0u8; len];
+            if len > 0 {
+                r.read_exact(&mut name)?;
+            }
+        }
+        id
     } else {
         read_int(r)? as u32
     };

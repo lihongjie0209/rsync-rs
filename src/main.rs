@@ -362,9 +362,9 @@ fn setup_compat<R: std::io::Read, W: std::io::Write>(
     opts: &Options,
     protocol: u32,
     do_compression: bool,
-) -> Result<(bool, i32, Option<String>)> {
+) -> Result<(bool, i32, Option<String>, u32)> {
     if protocol < 30 {
-        return Ok((false, 0, None));
+        return Ok((false, 0, None, 0));
     }
 
     // Build compat flags.  The C server sets CF_VARINT_FLIST_FLAGS when it sees
@@ -436,7 +436,7 @@ fn setup_compat<R: std::io::Read, W: std::io::Write>(
         crate::rdebug!("[rsync-rs] negotiated compression: {:?}", compression_choice);
     }
 
-    Ok((do_varint, checksum_seed, compression_choice))
+    Ok((do_varint, checksum_seed, compression_choice, compat_flags))
 }
 
 // ── Checksum type mapping ─────────────────────────────────────────────────────
@@ -456,15 +456,15 @@ fn strong_to_csum_type(
     }
 }
 
-/// Client-side compat setup. Returns `(do_varint, checksum_seed, compression_choice)`.
+/// Client-side compat setup. Returns `(do_varint, checksum_seed, compression_choice, compat_flags)`.
 fn setup_compat_client<R: std::io::Read, W: std::io::Write>(
     reader: &mut R,
     writer: &mut W,
     protocol: u32,
     do_compression: bool,
-) -> Result<(bool, i32, Option<String>)> {
+) -> Result<(bool, i32, Option<String>, u32)> {
     if protocol < 30 {
-        return Ok((false, 0, None));
+        return Ok((false, 0, None, 0));
     }
     let dbg = std::env::var_os("RSYNC_RS_DEBUG").is_some();
     if dbg { crate::rdebug!("[client-compat] reading compat_flags varint..."); }
@@ -499,7 +499,7 @@ fn setup_compat_client<R: std::io::Read, W: std::io::Write>(
     };
     if dbg { crate::rdebug!("[client-compat] negotiated compression: {:?}", compression_choice); }
 
-    Ok((do_varint, checksum_seed, compression_choice))
+    Ok((do_varint, checksum_seed, compression_choice, compat_flags))
 }
 
 // ── Server-mode dispatch ──────────────────────────────────────────────────────
@@ -587,11 +587,11 @@ pub fn run_server_io<R: std::io::Read, W: std::io::Write>(
     // This mirrors C rsync's setup_protocol() completion:
     //   server writes compat_flags (varint) + checksum list (vstring) + checksum_seed (int)
     //   client reads compat_flags, writes its checksum list, reads server's list + seed.
-    let (do_varint_flist, checksum_seed, compression_choice) =
+    let (do_varint_flist, checksum_seed, compression_choice, server_compat_flags) =
         if protocol >= 30 {
             setup_compat(&mut reader, &mut writer, opts, protocol, do_compression)?
         } else {
-            (false, 0, None)
+            (false, 0, None, 0u32)
         };
     let _ = do_varint_flist; // stored for future flist encoding selection
     let use_zlib = matches!(compression_choice.as_deref(), Some("zlib"));
@@ -666,7 +666,7 @@ pub fn run_server_io<R: std::io::Read, W: std::io::Write>(
 
         // Step 7: Send file list (through multiplexed output).
         crate::rdebug!("[rsync-rs] sending file list...");
-        crate::flist::send_file_list_ex(&mut writer, &flist, protocol, checksum_len, 0, preserve)
+        crate::flist::send_file_list_ex(&mut writer, &flist, protocol, checksum_len, 0, preserve, server_compat_flags)
             .context("send_file_list")?;
         crate::rdebug!("[rsync-rs] flushing after send_file_list");
         writer.flush().ok();
@@ -731,7 +731,7 @@ pub fn run_server_io<R: std::io::Read, W: std::io::Write>(
         let preserve = server_flags.to_preserve();
 
         // Step 5: Receive file list from client.
-        let flist = crate::flist::recv_file_list_ex(&mut reader, protocol, checksum_len, preserve.uid, preserve.gid)
+        let flist = crate::flist::recv_file_list_ex(&mut reader, protocol, checksum_len, preserve.uid, preserve.gid, server_compat_flags)
             .context("recv_file_list")?;
         crate::rdebug!("[rsync-rs] receiver: flist done ({} entries)", flist.files.len());
         // (The checksum seed was already exchanged during setup_compat; the C
@@ -1084,13 +1084,13 @@ fn run_client_protocol<R: std::io::Read, W: std::io::Write>(
     mut stdin_pipe: W,
     protocol: u32,
 ) -> Result<Stats> {
-    let (_do_varint, checksum_seed, compression_choice) = if protocol >= 30 {
+    let (_do_varint, checksum_seed, compression_choice, compat_flags) = if protocol >= 30 {
         crate::rdebug!("[rsync-rs client] starting setup_compat_client...");
         let r = setup_compat_client(&mut stdout_pipe, &mut stdin_pipe, protocol, opts.compress)?;
-        crate::rdebug!("[rsync-rs client] setup_compat_client done, seed={}", r.1);
+        crate::rdebug!("[rsync-rs client] setup_compat_client done, seed={}, compat=0x{:x}", r.1, r.3);
         r
     } else {
-        (false, 0, None)
+        (false, 0, None, 0u32)
     };
     let use_zlib = matches!(compression_choice.as_deref(), Some("zlib"));
 
@@ -1141,7 +1141,7 @@ fn run_client_protocol<R: std::io::Read, W: std::io::Write>(
         if opts.verbose >= 1 {
             println!("sending incremental file list");
         }
-        crate::flist::send::send_file_list_ex(&mut writer, &flist, protocol, checksum_len, 0, preserve)
+        crate::flist::send::send_file_list_ex(&mut writer, &flist, protocol, checksum_len, 0, preserve, compat_flags)
             .context("send_file_list")?;
         writer.flush().ok();
 
@@ -1186,7 +1186,7 @@ fn run_client_protocol<R: std::io::Read, W: std::io::Write>(
         if opts.verbose >= 1 {
             println!("receiving incremental file list");
         }
-        let flist = crate::flist::recv_file_list_ex(&mut reader, protocol, checksum_len, preserve.uid, preserve.gid)
+        let flist = crate::flist::recv_file_list_ex(&mut reader, protocol, checksum_len, preserve.uid, preserve.gid, compat_flags)
             .context("recv_file_list")?;
         crate::rdebug!("[rsync-rs client] received flist with {} entries", flist.files.len());
 
