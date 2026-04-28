@@ -4,20 +4,74 @@ A Rust implementation of [rsync](https://rsync.samba.org/), aiming for full
 wire-protocol compatibility with the upstream C `rsync` (3.4.x) so that a
 Rust client/server can talk to a C server/client and vice versa.
 
-## Status
+## Feature implementation
 
-- **Local mode** (`rsync-rs SRC DST`): regular files, symlinks, permissions,
-  mtimes, hard links (`-H`), zlib token framing (`--compress`), in-place
-  updates (`--inplace`), file-list verbose output, itemize-changes (`-i`).
-- **Remote mode** over SSH-style stdin/stdout: client and server, push and
-  pull, protocol 31, multiplexed I/O, checksum negotiation.
-- **Daemon mode** (`--daemon`): anonymous `rsyncd` with `[module]` config,
-  `@RSYNCD:` greeting, module listing, fork-per-connection (Unix).
-- **xattrs** (`--xattrs`): preserved in local-mode (best-effort, Unix only).
-- **ACLs** (`--acls`): currently a no-op with a startup warning.
+Legend: ✅ implemented · ⚠️ partial · ❌ not yet
 
-Regression suite: 49/49 scenarios passing against the C reference, including
-C ↔ Rust bidirectional transfers.
+| Area | Feature | Status | Notes |
+|---|---|---|---|
+| Transport | Local mode (`SRC DST`) | ✅ | Files, dirs, symlinks, hardlinks, perms, mtimes |
+| | Remote shell (`-e ssh`, `host:path`) | ✅ | Protocol 31, both directions |
+| | Daemon **server** (`--daemon`, `rsyncd.conf`) | ✅ | `@RSYNCD:` greeting, modules, list, pull, push (read-only off), fork-per-connection on Unix |
+| | Daemon **client** (`rsync://host/MOD/path`) | ❌ | Returns clean error; planned (see [`AUDIT.md` §4.1](AUDIT.md)) |
+| Wire format | Protocol versions 27–31, varint flist, MD5 strong sum, checksum-list negotiation | ✅ | |
+| | Inc-recurse (`CF_INC_RECURSE`) | ❌ | Falls back to non-incremental flist |
+| | Multiplexed I/O (`MSG_DATA/INFO/ERR`) | ✅ | |
+| Files | Regular files, dirs, symlinks | ✅ | |
+| | Hard links (`-H`) | ⚠️ | Local mode preserves; remote may send dupes |
+| | Devices/specials (`-D`) | ✅ | |
+| | xattrs (`-X`) | ⚠️ | Local mode only, Unix only |
+| | ACLs (`-A`) | ❌ | Accepted as no-op with warning |
+| Delta | Rolling+strong block matching | ✅ | |
+| | Compression `-z` (zlib token) | ✅ | Negotiates `none` if peer disagrees |
+| | `--inplace`, `--append`, `--partial` | ⚠️ | `--inplace` works; `--partial-dir`/`--temp-dir` not wired |
+| | `--backup`, `--write-batch`, `--read-batch` | ❌ | |
+| Output | `-v`, `-vv`, `--progress`, `--stats` | ✅ | Stream/format match C rsync |
+| | `--itemize-changes` (`-i`) | ✅ | 11-char format |
+| | `--list-only` | ✅ | |
+| | `--help`, `--version` | ✅ | Hand-rolled to mirror C layout |
+| Filters | `--exclude`/`--include`, `--exclude-from` | ✅ basic | No merge-files (`:` per-dir) |
+| Platforms | Linux x86_64, aarch64 (gnu+musl) | ✅ | CI build + tests |
+| | macOS x86_64, aarch64 | ✅ | CI build + tests |
+| | Windows x86_64 (MSVC) | ✅ | Local + self-loop daemon work; rsh transport over OpenSSH supported |
+
+## Cross-platform & cross-implementation compatibility
+
+CI runs the full regression suite (`tests/regress/`) on every push.  Each
+cell is a real subprocess run against the platform's native peer, not a
+mock.
+
+| Direction | Local | rsh / SSH | Daemon (`rsync://`) |
+|---|---|---|---|
+| **rs ↔ rs** (rsync-rs ↔ rsync-rs) | ✅ Linux · ✅ macOS · ✅ Windows | ✅ Linux · ✅ Windows (OpenSSH) | ✅ Linux self-loop · ✅ Windows self-loop |
+| **rs → C** (rs client → C server, push) | n/a | ⚠️ Linux: 1/4 fail (`text_files`) — known | ❌ rs client lacks `rsync://` transport |
+| **rs ← C** (rs client ← C server, pull) | n/a | ⚠️ Linux: 1/4 fail (`text_files`) — known | ❌ rs client lacks `rsync://` transport |
+| **C → rs** (C client → rs server, push) | n/a | ✅ Linux | ✅ Linux daemon receiver |
+| **C ← rs** (C client ← rs server, pull) | n/a | ✅ Linux | ✅ Linux daemon sender, list, file pull |
+| **rs (Windows) ↔ C (Linux)** | n/a | ⚠️ Same gaps as rs↔C above | ❌ Pending rs daemon-client port |
+
+CI matrix per push (`.github/workflows/ci.yml`):
+
+| Job | What it covers |
+|---|---|
+| `Unit tests` (Linux, macOS, Windows) | `cargo test` — 168+ unit tests |
+| `Build *` (6 targets) | Release artifacts for Linux gnu/musl, macOS, Windows |
+| `Windows smoke (native)` | rsync-rs ↔ rsync-rs on Windows via local + cwRsync rsh |
+| `Windows smoke (interop)` | rsync-rs ↔ cwRsync (Cygwin C build) on Windows |
+| `Linux interop` | 56 scenarios: local + rsh + daemon, rs↔rs and rs↔C 3.2.7 (currently 49/56 — gaps tracked in [`AUDIT.md` §4.1](AUDIT.md)) |
+
+### Known interop gaps
+
+Tracked in [`AUDIT.md` §4.1](AUDIT.md):
+
+1. **rs ↔ C 3.2.7 over rsh** — `text_files` and `single_small`/`nested_tree`
+   scenarios fail with `flist.c(786) protocol incompatibility` or hang.
+   Suspect missing handling of an XMIT flag emitted by 3.2.7's flist phase.
+2. **`rsync://` client transport** — rsync-rs as a client given a
+   `rsync://` URL bails with a clear error.  Implementing this is ~80 LoC
+   (port of C's `start_inband_exchange`); see issue tracker.
+3. **No AUTHREQD support** in the daemon server — modules with
+   `auth users`/`secrets file` are not honored.
 
 ## Building
 
