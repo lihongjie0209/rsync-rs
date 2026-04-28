@@ -218,10 +218,19 @@ pub fn run_server_receiver<R: Read, W: Write>(
         }
     }
     crate::rdebug!("[srv-recv] flist has {} entries, scanning regular files", flist.files.len());
+    for (i, fi) in flist.files.iter().enumerate() {
+        crate::rdebug!("[srv-recv] flist[{}] {:?} flags=0x{:x} hlink_ndx={} size={}", i, fi.path(), fi.flags, fi.hard_link_first_ndx, fi.size);
+    }
 
     // Phase 0: walk flist and ask for each regular file.
     for (i, fi) in flist.files.iter().enumerate() {
         if !fi.is_regular() {
+            continue;
+        }
+        // Skip hardlink followers: they'll be created as hardlinks after all
+        // leaders have been transferred.  The sender does not expect us to
+        // request followers — sending a follower NDX causes protocol desync.
+        if fi.hard_link_first_ndx >= 0 {
             continue;
         }
         let dest_path = dest_dir.join(fi.path());
@@ -371,6 +380,7 @@ pub fn run_server_receiver<R: Read, W: Write>(
             }
             fs::rename(&tmp_path, &dest_path)?;
         }
+        crate::rdebug!("[srv-recv] wrote {:?} {} bytes (ndx={})", dest_path, new_data.len(), ndx);
         apply_metadata(&dest_path, fi)?;
 
         if itemize {
@@ -415,6 +425,38 @@ pub fn run_server_receiver<R: Read, W: Write>(
             #[cfg(windows)]
             {
                 let _ = std::os::windows::fs::symlink_file(target, &p);
+            }
+        }
+    }
+
+    // Hardlink followers: create hard links to their group leader.
+    // Done after all regular file transfers so the leader is guaranteed to
+    // exist on disk.
+    for fi in flist.files.iter() {
+        if fi.hard_link_first_ndx < 0 {
+            continue;
+        }
+        let rel_idx = (fi.hard_link_first_ndx - flist.ndx_start) as usize;
+        if rel_idx >= flist.files.len() {
+            continue;
+        }
+        let first_fi = &flist.files[rel_idx];
+        let leader_path = dest_dir.join(first_fi.path());
+        let follower_path = dest_dir.join(fi.path());
+        if let Some(parent) = follower_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        crate::rdebug!("[srv-recv] hardlink: {:?} -> {:?} (first_ndx={} rel={})", follower_path, leader_path, fi.hard_link_first_ndx, rel_idx);
+        let _ = fs::remove_file(&follower_path);
+        let link_result = fs::hard_link(&leader_path, &follower_path);
+        if let Err(e) = link_result {
+            crate::rdebug!("[srv-recv] hardlink failed: {}, trying copy", e);
+            // Fall back to copying so the follower path is not left missing.
+            if let Err(copy_err) = fs::copy(&leader_path, &follower_path) {
+                eprintln!(
+                    "rsync-rs: hardlink {:?} -> {:?} failed: {} (copy fallback also failed: {})",
+                    follower_path, leader_path, e, copy_err
+                );
             }
         }
     }

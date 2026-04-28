@@ -63,10 +63,14 @@ pub struct FileInfo {
     pub rdev_major: u32,
     /// Device minor number (Some only for `FileType::Device`).
     pub rdev_minor: u32,
-    /// Index of the first file in a hard-link cluster (`-1` = not hard-linked).
+    /// Index of the first file in a hard-link cluster (`-1` = not hard-linked or is leader).
     pub hard_link_first_ndx: i32,
     /// Strong checksum (MD4/MD5/SHA-1 digest), if computed.
     pub checksum: Option<Vec<u8>>,
+    /// Device ID (local-only, not transmitted; 0 on non-Unix or unknown).
+    pub dev: u64,
+    /// Inode number (local-only, not transmitted; 0 on non-Unix or unknown).
+    pub ino: u64,
 }
 
 impl FileInfo {

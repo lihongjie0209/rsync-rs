@@ -250,6 +250,12 @@ def all_scenarios() -> list[Scenario]:
     sc.append(_local_only("local__hardlinks__aH", fx_hardlinks(), ["-aH"],
                           verify_dst=verify_hardlinks))
 
+    # Hardlinks via protocol (C↔rsync-rs): verify inode sharing is preserved.
+    sc.append(_c_pulls("c_pulls__hardlinks__aH", fx_hardlinks(), ["-aH"],
+                       verify_dst=verify_hardlinks))
+    sc.append(_c_pushes("c_pushes__hardlinks__aH", fx_hardlinks(), ["-aH"],
+                        verify_dst=verify_hardlinks))
+
     # ── 2. C client pulls from rsync-rs (server-sender path) ──────────────
     for fx in (fx_single_small(), fx_text_files(), fx_nested_tree(), fx_mixed_sizes()):
         sc.append(_c_pulls(f"c_pulls__{fx.name}__vrt", fx, ["-vrt"]))
@@ -295,22 +301,19 @@ def all_scenarios() -> list[Scenario]:
     sc.append(_c_pulls("c_pulls__itemize__a", fx_text_files(), ["-a", "--itemize-changes"]))
 
     # ── 3. C client pushes to rsync-rs (server-receiver path) ─────────────
-    # These currently exercise a code-path rsync-rs does not yet support;
-    # they're listed so the suite reports them as failures until the work
-    # lands.  Mark with expect_exit anything different to acknowledge known gaps.
-    for fx in (fx_single_small(), fx_text_files()):
+    for fx in (fx_single_small(), fx_text_files(), fx_nested_tree(), fx_mixed_sizes()):
         sc.append(_c_pushes(f"c_pushes__{fx.name}__av", fx, ["-av"]))
 
     # ── 4. rsync-rs client pulls from C server ────────────────────────────
-    for fx in (fx_single_small(), fx_text_files()):
+    for fx in (fx_single_small(), fx_text_files(), fx_nested_tree(), fx_mixed_sizes()):
         sc.append(_rs_pulls_c(f"rs_pulls_c__{fx.name}__av", fx, ["-av"]))
 
     # ── 4b. rsync-rs client pushes to C server (the new direction) ────────
-    for fx in (fx_single_small(), fx_text_files(), fx_nested_tree()):
+    for fx in (fx_single_small(), fx_text_files(), fx_nested_tree(), fx_mixed_sizes()):
         sc.append(_rs_pushes_c(f"rs_pushes_c__{fx.name}__av", fx, ["-av"]))
 
     # ── 5. rsync-rs ↔ rsync-rs (self) ────────────────────────────────────
-    for fx in (fx_single_small(), fx_text_files(), fx_nested_tree()):
+    for fx in (fx_single_small(), fx_text_files(), fx_nested_tree(), fx_mixed_sizes()):
         sc.append(_self(f"self__{fx.name}__av", fx, ["-av"]))
 
     # ── 6. --delete support ───────────────────────────────────────────────
@@ -355,6 +358,72 @@ def all_scenarios() -> list[Scenario]:
     # rsync-rs ↔ rsync-rs (self) with --delete
     sc.append(_self("self__delete__av", fx_text_files(), ["-av", "--delete"],
                     setup_dst=_setup_stale, verify_dst=_verify_stale))
+
+    # ── 7. --exclude / --include filter support ───────────────────────────
+    # Fixture: files with varied extensions; we exclude *.log and build/ dir.
+    fx_excl = Fixture(
+        name="exclude_test",
+        files=[
+            FileSpec("keep.txt", content=b"keep\n"),
+            FileSpec("notes.log", content=b"log data\n"),
+            FileSpec("src/main.c", content=b"int main(){}\n"),
+            FileSpec("src/debug.log", content=b"debug\n"),
+            FileSpec("build/output.bin", content=b"compiled\n"),
+            FileSpec("README.md", content=b"readme\n"),
+        ],
+    )
+    _excl_flags = ["-av", "--exclude=*.log", "--exclude=build/"]
+    _excl_present = ["keep.txt", "src/main.c", "README.md"]
+    _excl_absent  = ["notes.log", "src/debug.log", "build/output.bin"]
+
+    def _verify_exclude(dst: Path) -> "str | None":
+        missing = [n for n in _excl_present if not (dst / n).exists()]
+        present = [n for n in _excl_absent  if (dst / n).exists()]
+        errs = []
+        if missing:
+            errs.append(f"expected files not synced: {missing}")
+        if present:
+            errs.append(f"excluded files were synced anyway: {present}")
+        return "; ".join(errs) if errs else None
+
+    sc.append(_local_only("local__exclude__av", fx_excl, _excl_flags,
+                          ignore_paths=_excl_absent, verify_dst=_verify_exclude))
+    sc.append(_c_pulls("c_pulls__exclude__av", fx_excl, _excl_flags,
+                       ignore_paths=_excl_absent, verify_dst=_verify_exclude))
+    sc.append(_rs_pulls_c("rs_pulls_c__exclude__av", fx_excl, _excl_flags,
+                          ignore_paths=_excl_absent, verify_dst=_verify_exclude))
+    sc.append(_rs_pushes_c("rs_pushes_c__exclude__av", fx_excl, _excl_flags,
+                           ignore_paths=_excl_absent, verify_dst=_verify_exclude))
+
+    # ── 8. --checksum: force content comparison rather than size+mtime ────
+    # Plant a same-size file with different content so a pure size+mtime check
+    # would call it up-to-date, but --checksum forces a re-transfer.
+    def _setup_checksum_trap(dst: Path) -> None:
+        p = dst / "readme.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"WRONG CONTENT (same size = wrong)\n")
+        import os, time
+        # Touch with future mtime so mtime check also says "up to date"
+        future = time.time() + 3600
+        os.utime(p, (future, future))
+
+    def _verify_checksum(dst: Path) -> "str | None":
+        p = dst / "readme.md"
+        if not p.exists():
+            return "readme.md missing from dst"
+        got = p.read_bytes()
+        if got == b"WRONG CONTENT (same size = wrong)\n":
+            return "--checksum did not re-transfer the modified file"
+        return None
+
+    sc.append(_local_only("local__checksum__a", fx_text_files(), ["-a", "--checksum"],
+                          setup_dst=_setup_checksum_trap, verify_dst=_verify_checksum))
+    # c_pulls__checksum__av: --checksum forces whole-file MD4 exchange in the
+    # generator→sender path (sum2 after SumHead). rsync-rs sender does not yet
+    # handle this; skip until the --checksum protocol path is implemented.
+    sc.append(_c_pulls("c_pulls__checksum__av", fx_text_files(), ["-av", "--checksum"],
+                       setup_dst=_setup_checksum_trap, verify_dst=_verify_checksum,
+                       skip_if=lambda: "--checksum remote protocol not yet implemented in rsync-rs sender"))
 
     return sc
 

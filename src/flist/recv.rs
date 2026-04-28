@@ -11,8 +11,9 @@ use crate::io::varint::{
 };
 use crate::protocol::constants::{
     CF_INC_RECURSE, CF_VARINT_FLIST_FLAGS, XMIT_EXTENDED_FLAGS, XMIT_GROUP_NAME_FOLLOWS,
-    XMIT_IO_ERROR_ENDLIST, XMIT_LONG_NAME, XMIT_MOD_NSEC, XMIT_SAME_GID, XMIT_SAME_MODE,
-    XMIT_SAME_NAME, XMIT_SAME_TIME, XMIT_SAME_UID, XMIT_USER_NAME_FOLLOWS,
+    XMIT_HLINK_FIRST, XMIT_HLINKED, XMIT_IO_ERROR_ENDLIST, XMIT_LONG_NAME, XMIT_MOD_NSEC,
+    XMIT_SAME_GID, XMIT_SAME_MODE, XMIT_SAME_NAME, XMIT_SAME_TIME, XMIT_SAME_UID,
+    XMIT_USER_NAME_FOLLOWS, FLAG_HLINKED,
 };
 use crate::protocol::types::{FileInfo, FileList, FileType};
 
@@ -105,15 +106,38 @@ pub fn recv_file_list_ex<R: Read>(
             }
             break;
         }
-        let fi = recv_file_entry_inner(r, xflags, prev.as_ref(), protocol, checksum_len)?;
+        let fi = recv_file_entry_inner(r, xflags, prev.as_ref(), protocol, checksum_len, &flist.files, flist.ndx_start)?;
         prev = Some(fi.clone());
         flist.files.push(fi);
     }
 
-    // C's send_file_list calls flist_sort_and_clean AFTER sending entries
-    // (flist.c:2509). The receiver does the same so that NDX indices match
-    // on both sides. We must sort here too.
-    crate::flist::sort::flist_sort(&mut flist);
+    // Sort the received flist so our NDX order matches C rsync's receiver.
+    // C's receiver also calls flist_sort_and_clean after receiving entries.
+    // However, C rsync assigns hardlink first_hlink_ndx values based on the
+    // SENDER's sorted order which may differ from ours.  After sorting, we
+    // remap hard_link_first_ndx so it reflects the new (post-sort) positions.
+    let n = flist.files.len();
+
+    // Sort using (original_index, file) so we can build the permutation.
+    let mut indexed: Vec<(usize, FileInfo)> = flist.files.drain(..).enumerate().collect();
+    indexed.sort_by(|(_, a), (_, b)| crate::flist::sort::file_compare(a, b));
+
+    // Build old_ndx → new_pos mapping.
+    let mut old_to_new = vec![0usize; n];
+    for (new_pos, (old_pos, _)) in indexed.iter().enumerate() {
+        old_to_new[*old_pos] = new_pos;
+    }
+    flist.files = indexed.into_iter().map(|(_, fi)| fi).collect();
+
+    // Remap hardlink leader references to reflect the new positions.
+    for fi in flist.files.iter_mut() {
+        if fi.hard_link_first_ndx >= 0 {
+            let old_ndx = (fi.hard_link_first_ndx - flist.ndx_start) as usize;
+            if old_ndx < old_to_new.len() {
+                fi.hard_link_first_ndx = (old_to_new[old_ndx] as i32) + flist.ndx_start;
+            }
+        }
+    }
 
     flist.sorted = (0..flist.files.len()).collect();
     Ok(flist)
@@ -129,16 +153,21 @@ pub fn recv_file_entry<R: Read>(
     checksum_len: usize,
 ) -> anyhow::Result<FileInfo> {
     let xflags = read_varint(r)? as u32;
-    recv_file_entry_inner(r, xflags, prev, protocol, checksum_len)
+    recv_file_entry_inner(r, xflags, prev, protocol, checksum_len, &[], 0)
 }
 
 /// Core decoder: reconstruct a [`FileInfo`] given already-read `xflags`.
+///
+/// `flist_so_far` and `ndx_start` are used to resolve hardlink first-member
+/// references for protocol 30+ non-first members.
 fn recv_file_entry_inner<R: Read>(
     r: &mut R,
     xflags: u32,
     prev: Option<&FileInfo>,
     protocol: u32,
     checksum_len: usize,
+    flist_so_far: &[FileInfo],
+    ndx_start: i32,
 ) -> anyhow::Result<FileInfo> {
     let prev_name = prev.map(|p| p.path()).unwrap_or_default();
 
@@ -167,6 +196,47 @@ fn recv_file_entry_inner<R: Read>(
     } else {
         (None, full_name)
     };
+
+    // ── hardlink non-first member (protocol 30+) ──────────────────────────
+    // Wire format: xflags (XMIT_HLINKED set, XMIT_HLINK_FIRST NOT set) + name
+    // + first_hlink_ndx (varint).  All remaining metadata is omitted; we copy
+    // it from the first entry in this flist batch.
+    if protocol >= 30
+        && (xflags & XMIT_HLINKED != 0)
+        && (xflags & XMIT_HLINK_FIRST == 0)
+    {
+        let first_hlink_ndx = read_varint(r)? as i32;
+        let rel_idx = first_hlink_ndx - ndx_start;
+        if rel_idx >= 0 && (rel_idx as usize) < flist_so_far.len() {
+            let first = &flist_so_far[rel_idx as usize];
+            return Ok(FileInfo {
+                name: basename,
+                dirname,
+                modtime: first.modtime,
+                mod_nsec: first.mod_nsec,
+                size: first.size,
+                mode: first.mode,
+                flags: FLAG_HLINKED,
+                uid: first.uid,
+                gid: first.gid,
+                link_target: first.link_target.clone(),
+                rdev_major: first.rdev_major,
+                rdev_minor: first.rdev_minor,
+                hard_link_first_ndx: first_hlink_ndx,
+                dev: 0,
+                ino: 0,
+                checksum: None,
+            });
+        }
+        // Out-of-range reference: the sender is referencing an entry from a
+        // prior batch (cross-batch hardlink).  We cannot resolve it without
+        // storing the prior batch, so report an error.
+        return Err(anyhow::anyhow!(
+            "hardlink reference {first_hlink_ndx} out of range \
+             (ndx_start={ndx_start}, entries_so_far={})",
+            flist_so_far.len()
+        ));
+    }
 
     // ── file length ───────────────────────────────────────────────────────
     let size = read_varlong(r, 3)?;
@@ -281,6 +351,8 @@ fn recv_file_entry_inner<R: Read>(
         rdev_major,
         rdev_minor,
         hard_link_first_ndx: -1,
+        dev: 0,
+        ino: 0,
         checksum,
     })
 }

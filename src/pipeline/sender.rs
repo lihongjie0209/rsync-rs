@@ -18,7 +18,10 @@ use crate::delta::match_blocks::{
 };
 use crate::delta::token::TokenWriter;
 use crate::fileops::slurp_file;
-use crate::io::varint::{read_int, read_ndx, read_shortint, write_int, write_ndx, write_shortint};
+use crate::io::varint::{
+    read_byte, read_int, read_ndx, read_shortint, read_vstring, write_byte, write_int, write_ndx,
+    write_shortint, write_vstring,
+};
 use crate::protocol::constants::{
     CsumType, ITEM_BASIS_TYPE_FOLLOWS, ITEM_TRANSFER, ITEM_XNAME_FOLLOWS, NDX_DONE,
 };
@@ -107,15 +110,18 @@ impl<R: Read, W: Write> Sender<R, W> {
             };
 
             // Read optional fnamecmp_type.
-            if iflags & ITEM_BASIS_TYPE_FOLLOWS != 0 {
-                let _fnamecmp_type = crate::io::varint::read_byte(&mut self.reader)?;
-            }
+            let fnamecmp_type = if iflags & ITEM_BASIS_TYPE_FOLLOWS != 0 {
+                read_byte(&mut self.reader)?
+            } else {
+                0
+            };
 
             // Read optional xname.
-            if iflags & ITEM_XNAME_FOLLOWS != 0 {
-                let _xname = crate::io::varint::read_vstring(&mut self.reader)
-                    .unwrap_or_default();
-            }
+            let xname = if iflags & ITEM_XNAME_FOLLOWS != 0 {
+                read_vstring(&mut self.reader).unwrap_or_default()
+            } else {
+                String::new()
+            };
 
             // Echo NDX + iflags back to receiver before sending data.
             if protocol >= 30 {
@@ -125,6 +131,13 @@ impl<R: Read, W: Write> Sender<R, W> {
             }
             if protocol >= 29 {
                 write_shortint(&mut self.writer, iflags as u16)?;
+            }
+            // Echo optional fields that receiver must also see.
+            if iflags & ITEM_BASIS_TYPE_FOLLOWS != 0 {
+                write_byte(&mut self.writer, fnamecmp_type)?;
+            }
+            if iflags & ITEM_XNAME_FOLLOWS != 0 {
+                write_vstring(&mut self.writer, &xname)?;
             }
 
             if iflags & ITEM_TRANSFER == 0 {

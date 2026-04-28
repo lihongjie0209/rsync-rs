@@ -75,13 +75,17 @@ pub fn run_local(opts: &Options, sources: &[String], dest: &str) -> Result<Local
             .with_context(|| format!("create_dir_all {dest_path:?}"))?;
     }
 
+    // Build the exclude/include filter from CLI options.
+    let filter = crate::filter::FilterList::from_options(opts)
+        .unwrap_or_default();
+
     // Track everything we actually wrote (relative to dest root) so that
     // --delete can drop the rest.
     let mut kept: HashSet<PathBuf> = HashSet::new();
     let mut links = LinkMap::default();
 
     for src in sources {
-        copy_one(opts, src, &dest_path, dest_is_dir, &mut report, &mut kept, &mut links)
+        copy_one(opts, src, &dest_path, dest_is_dir, &filter, &mut report, &mut kept, &mut links)
             .with_context(|| format!("copying {src}"))?;
     }
 
@@ -98,6 +102,7 @@ fn copy_one(
     src: &str,
     dest_root: &Path,
     dest_is_dir: bool,
+    filter: &crate::filter::FilterList,
     report: &mut LocalReport,
     kept: &mut HashSet<PathBuf>,
     links: &mut LinkMap,
@@ -137,7 +142,7 @@ fn copy_one(
             fs::create_dir_all(&into)
                 .with_context(|| format!("create_dir_all {into:?}"))?;
         }
-        copy_dir_recursive(opts, &src_path, &into, PathBuf::new(), report, kept, links)?;
+        copy_dir_recursive(opts, &src_path, &into, PathBuf::new(), filter, report, kept, links)?;
         // Keep the dest dir itself.
         if let Ok(rel) = into.strip_prefix(dest_root) {
             kept.insert(rel.to_path_buf());
@@ -171,6 +176,7 @@ fn copy_dir_recursive(
     src_dir: &Path,
     dest_dir: &Path,
     prefix: PathBuf,
+    filter: &crate::filter::FilterList,
     report: &mut LocalReport,
     kept: &mut HashSet<PathBuf>,
     links: &mut LinkMap,
@@ -188,6 +194,12 @@ fn copy_dir_recursive(
             .metadata()
             .with_context(|| format!("stat {src_child:?}"))?;
 
+        // Apply exclude filter using the relative path (forward slashes).
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if filter.is_excluded(&rel_str, meta.is_dir()) {
+            continue;
+        }
+
         kept.insert(rel.clone());
 
         if meta.is_dir() {
@@ -195,7 +207,7 @@ fn copy_dir_recursive(
                 fs::create_dir_all(&dest_child)
                     .with_context(|| format!("create_dir_all {dest_child:?}"))?;
             }
-            copy_dir_recursive(opts, &src_child, &dest_child, rel.clone(), report, kept, links)?;
+            copy_dir_recursive(opts, &src_child, &dest_child, rel.clone(), filter, report, kept, links)?;
             apply_dir_meta(opts, &dest_child, &meta)?;
         } else {
             copy_entry(opts, &src_child, &dest_child, &meta, &rel, report, links)?;

@@ -60,6 +60,11 @@ impl<R: Read, W: Write> Generator<R, W> {
             if !fi.is_regular() {
                 continue;
             }
+            // Skip hardlink followers: they'll be linked to the leader after
+            // all transfers are complete.
+            if fi.hard_link_first_ndx >= 0 {
+                continue;
+            }
 
             let should_transfer = checksum_whole_file || Self::needs_update(fi, dest_dir);
             if !should_transfer {

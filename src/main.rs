@@ -504,12 +504,31 @@ fn setup_compat_client<R: std::io::Read, W: std::io::Write>(
 
 // ── Server-mode dispatch ──────────────────────────────────────────────────────
 
-/// Receive and discard the filter-rule list sent by the remote peer.
+/// Receive the filter-rule list sent by the remote peer and return a parsed
+/// `FilterList`.
 ///
 /// The C rsync client always sends a filter list (terminated by `write_int(0)`)
-/// before the server sends or receives the file list.  We must consume it so
-/// we don't misinterpret the first rule as a generator index or a file-list
-/// entry.
+/// before the server sends or receives the file list.  We parse and return the
+/// rules so the caller can apply them when building the file list.
+fn recv_and_parse_filter_list<R: std::io::Read>(reader: &mut R) -> Result<crate::filter::FilterList> {
+    let mut filter = crate::filter::FilterList::new();
+    loop {
+        let len = read_int(reader)?;
+        if len == 0 {
+            break;
+        }
+        let len = len as usize;
+        let mut buf = vec![0u8; len];
+        reader.read_exact(&mut buf)?;
+        if let Ok(s) = std::str::from_utf8(&buf) {
+            filter.parse_rule(s);
+        }
+    }
+    Ok(filter)
+}
+
+/// Receive and discard the filter-rule list (used in push/receiver paths where
+/// we don't need to apply sender-side filtering).
 fn recv_filter_list<R: std::io::Read>(reader: &mut R) -> Result<()> {
     loop {
         let len = read_int(reader)?;
@@ -708,9 +727,9 @@ pub fn run_server_io<R: std::io::Read, W: std::io::Write>(
         // Server IS the sender (client is pulling files FROM us).
         unsafe { log_mod::set_who("sender") };
 
-        // Step 4: Consume filter rules from client (terminated by int(0)).
+        // Step 4: Receive and parse filter rules from client (terminated by int(0)).
         crate::rdebug!("[rsync-rs] waiting for filter list...");
-        recv_filter_list(&mut reader).context("recv_filter_list")?;
+        let client_filter = recv_and_parse_filter_list(&mut reader).context("recv_filter_list")?;
         crate::rdebug!("[rsync-rs] filter list received");
 
         // Step 5: Resolve source paths.
@@ -751,7 +770,7 @@ pub fn run_server_io<R: std::io::Read, W: std::io::Write>(
                     root_fi.flags |= crate::protocol::constants::FLAG_TOP_DIR;
                     flist.files.push(root_fi);
                 }
-                walk_source_dir(path, "", recursive, &mut flist);
+                walk_source_dir(path, "", recursive, &mut flist, &client_filter);
             } else if let Ok(meta) = std::fs::metadata(path) {
                 let name =
                     path.file_name().and_then(|n| n.to_str()).unwrap_or(src).to_string();
@@ -1241,6 +1260,8 @@ fn run_client_protocol<R: std::io::Read, W: std::io::Write>(
 
     let stats = if is_push {
         // Build flist from local sources by walking the tree.
+        let local_filter = crate::filter::FilterList::from_options(&opts)
+            .unwrap_or_default();
         let mut flist = crate::protocol::types::FileList::new();
         for src in sources {
             let p = std::path::Path::new(src);
@@ -1253,7 +1274,7 @@ fn run_client_protocol<R: std::io::Read, W: std::io::Write>(
                     root_fi.flags |= crate::protocol::constants::FLAG_TOP_DIR;
                     flist.files.push(root_fi);
                 }
-                walk_source_dir(p, "", recursive, &mut flist);
+                walk_source_dir(p, "", recursive, &mut flist, &local_filter);
             } else if let Ok(meta) = p.symlink_metadata() {
                 let name =
                     p.file_name().and_then(|n| n.to_str()).unwrap_or(src).to_string();
@@ -1317,8 +1338,20 @@ fn run_client_protocol<R: std::io::Read, W: std::io::Write>(
         }
         final_stats
     } else {
-        // Client-receiver (pull). C sends an empty filter list (write_int(0)).
-        crate::rdebug!("[rsync-rs client] sending filter list terminator...");
+        // Client-receiver (pull): send our filter rules to the server so it
+        // can apply them when building the file list.
+        crate::rdebug!("[rsync-rs client] sending filter list...");
+        {
+            let filter = crate::filter::FilterList::from_options(&opts).unwrap_or_default();
+            for rule in &filter.rules {
+                // C rsync format: write_int(len) then "- pattern" or "+ pattern"
+                let is_include = rule.rflags & crate::filter::FILTRULE_INCLUDE != 0;
+                let prefix = if is_include { "+ " } else { "- " };
+                let rule_str = format!("{}{}", prefix, rule.pattern);
+                write_int(&mut writer, rule_str.len() as i32)?;
+                writer.write_all(rule_str.as_bytes())?;
+            }
+        }
         write_int(&mut writer, 0)?;
         writer.flush().ok();
 
@@ -1439,6 +1472,7 @@ fn walk_source_dir(
     prefix: &str,
     recursive: bool,
     flist: &mut crate::protocol::types::FileList,
+    filter: &crate::filter::FilterList,
 ) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -1459,6 +1493,11 @@ fn walk_source_dir(
         let (dirname, name) = split_rel(&rel);
 
         let ft = meta.file_type();
+        // Apply exclude filter using full relative path (basename-only patterns
+        // automatically match against the last component inside is_excluded).
+        if filter.is_excluded(&rel, ft.is_dir()) {
+            continue;
+        }
         if ft.is_symlink() {
             let mut fi = file_info_from_meta(&name, dirname.as_deref(), &meta);
             if let Ok(target) = std::fs::read_link(entry.path()) {
@@ -1468,7 +1507,7 @@ fn walk_source_dir(
         } else if ft.is_dir() {
             flist.files.push(file_info_from_meta(&name, dirname.as_deref(), &meta));
             if recursive {
-                walk_source_dir(&entry.path(), &rel, true, flist);
+                walk_source_dir(&entry.path(), &rel, true, flist, filter);
             }
         } else {
             flist.files.push(file_info_from_meta(&name, dirname.as_deref(), &meta));
