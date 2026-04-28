@@ -397,14 +397,18 @@ def all_scenarios() -> list[Scenario]:
                            ignore_paths=_excl_absent, verify_dst=_verify_exclude))
 
     # ── 8. --checksum: force content comparison rather than size+mtime ────
-    # Plant a same-size file with different content so a pure size+mtime check
-    # would call it up-to-date, but --checksum forces a re-transfer.
+    # Plant a same-size file with DIFFERENT content but a future mtime so a pure
+    # size+mtime check would call it up-to-date; --checksum must force re-transfer.
+    # fx_text_files() has readme.md = b"# project\n\nhello\n" (17 bytes).
+    _CHECKSUM_TRAP = b"WRONG WRONG WRONG"  # exactly 17 bytes, wrong content
+    assert len(_CHECKSUM_TRAP) == 17, "trap size must match source readme.md size"
+
     def _setup_checksum_trap(dst: Path) -> None:
         p = dst / "readme.md"
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(b"WRONG CONTENT (same size = wrong)\n")
+        p.write_bytes(_CHECKSUM_TRAP)
         import os, time
-        # Touch with future mtime so mtime check also says "up to date"
+        # Future mtime so a size+mtime check would (incorrectly) say "up to date"
         future = time.time() + 3600
         os.utime(p, (future, future))
 
@@ -413,18 +417,17 @@ def all_scenarios() -> list[Scenario]:
         if not p.exists():
             return "readme.md missing from dst"
         got = p.read_bytes()
-        if got == b"WRONG CONTENT (same size = wrong)\n":
+        if got == _CHECKSUM_TRAP:
             return "--checksum did not re-transfer the modified file"
         return None
 
     sc.append(_local_only("local__checksum__a", fx_text_files(), ["-a", "--checksum"],
                           setup_dst=_setup_checksum_trap, verify_dst=_verify_checksum))
-    # c_pulls__checksum__av: --checksum forces whole-file MD4 exchange in the
-    # generator→sender path (sum2 after SumHead). rsync-rs sender does not yet
-    # handle this; skip until the --checksum protocol path is implemented.
+    # c_pulls__checksum__av: C rsync client with --checksum pulls from rsync-rs server.
+    # The bundled 'c' flag in the server args must set checksum_len so the file list
+    # includes per-file checksums; otherwise the wire format is mismatched.
     sc.append(_c_pulls("c_pulls__checksum__av", fx_text_files(), ["-av", "--checksum"],
-                       setup_dst=_setup_checksum_trap, verify_dst=_verify_checksum,
-                       skip_if=lambda: "--checksum remote protocol not yet implemented in rsync-rs sender"))
+                       setup_dst=_setup_checksum_trap, verify_dst=_verify_checksum))
 
     # ── 9. --write-batch / --read-batch (rsync-rs native format) ─────────────
     # Each test: write-batch from src, apply read-batch to dst, compare trees.

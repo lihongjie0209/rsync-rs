@@ -711,7 +711,11 @@ pub fn run_server_io<R: std::io::Read, W: std::io::Write>(
 
     let csum_ct = crate::checksum::strong::ChecksumType::for_protocol(protocol, false);
     let rsync_ct = strong_to_csum_type(csum_ct);
-    let checksum_len = if opts.checksum { csum_ct.digest_len() } else { 0 };
+    // checksum_len > 0 means every file entry in the list carries a whole-file
+    // checksum.  In server mode the flag arrives as the bundled short 'c' inside
+    // server_flags; opts.checksum may be false even when the client requested it.
+    let use_checksum = opts.checksum || server_flags.checksum;
+    let checksum_len = if use_checksum { csum_ct.digest_len() } else { 0 };
 
     // Step 3: Enable multiplexed I/O on both directions.
     // C rsync: io_start_multiplex_out() for protocol >= 23
