@@ -21,6 +21,7 @@ from .harness import (
     FileSpec, Fixture, Scenario,
     make_sync_local, make_sync_pull_via_wrapper, make_sync_push_via_wrapper,
     make_sync_rs_pulls_from_c, make_sync_rs_push_to_c, make_sync_self,
+    make_sync_batch, make_sync_backup_dir,
     need_binary, need_symlink_support,
 )
 
@@ -424,6 +425,59 @@ def all_scenarios() -> list[Scenario]:
     sc.append(_c_pulls("c_pulls__checksum__av", fx_text_files(), ["-av", "--checksum"],
                        setup_dst=_setup_checksum_trap, verify_dst=_verify_checksum,
                        skip_if=lambda: "--checksum remote protocol not yet implemented in rsync-rs sender"))
+
+    # ── 9. --write-batch / --read-batch (rsync-rs native format) ─────────────
+    # Each test: write-batch from src, apply read-batch to dst, compare trees.
+    def _batch(name: str, fx: Fixture, flags: list[str], **kw) -> Scenario:
+        kw.setdefault("skip_if", need_binary("rsync-rs"))
+        return Scenario(name=name, fixture=fx, sync=make_sync_batch(flags), flags=flags, **kw)
+
+    sc.append(_batch("batch__single_small__av",  fx_single_small(),  ["-av"]))
+    sc.append(_batch("batch__nested_tree__av",   fx_nested_tree(),   ["-av"]))
+    sc.append(_batch("batch__text_files__av",    fx_text_files(),    ["-av"]))
+    sc.append(_batch("batch__mixed_sizes__av",   fx_mixed_sizes(),   ["-av"]))
+
+    # ── 10. --backup (in-place suffix) and --backup-dir ───────────────────────
+    def _setup_existing(dst: Path) -> None:
+        """Pre-populate dst with a file that will be overwritten."""
+        f = dst / "readme.md"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"OLD CONTENT\n")
+
+    def _verify_backup_suffix(dst: Path) -> "str | None":
+        orig = dst / "readme.md"
+        bak  = dst / "readme.md~"
+        if not orig.exists():
+            return "readme.md missing after --backup sync"
+        if not bak.exists():
+            return "readme.md~ backup not created"
+        if bak.read_bytes() != b"OLD CONTENT\n":
+            return "backup file has wrong content"
+        return None
+
+    sc.append(_local_only("local__backup_suffix__av",
+                          fx_text_files(), ["-av", "--backup"],
+                          setup_dst=_setup_existing, verify_dst=_verify_backup_suffix,
+                          ignore_paths=["readme.md~"]))
+
+    def _verify_backup_dir_result(dst: Path) -> "str | None":
+        bak = dst.parent / "bak"
+        bak_file = bak / "readme.md"
+        if not bak_file.exists():
+            return f"backup-dir file not created: {bak_file}"
+        if bak_file.read_bytes() != b"OLD CONTENT\n":
+            return "backup-dir file has wrong content"
+        return None
+
+    sc.append(Scenario(
+        name="local__backup_dir__av",
+        fixture=fx_text_files(),
+        sync=make_sync_backup_dir(["-av", "--backup"], backup_subdir="bak"),
+        flags=["-av", "--backup"],
+        skip_if=need_binary("rsync-rs"),
+        setup_dst=_setup_existing,
+        verify_dst=_verify_backup_dir_result,
+    ))
 
     return sc
 

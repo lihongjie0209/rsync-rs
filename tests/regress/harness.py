@@ -309,6 +309,55 @@ def make_sync_self(flags: Sequence[str]) -> SyncCallable:
     return go
 
 
+def make_sync_batch(flags: Sequence[str]) -> SyncCallable:
+    """Write a batch from src, then read-batch into dst.
+
+    Two steps:
+      1. rsync-rs <flags> --write-batch=<tmp>/batch src/ <tmp>/staging/
+      2. rsync-rs <flags> --read-batch=<tmp>/batch dst/
+    The harness then compares src vs dst as usual.
+    """
+    def go(src: Path, dst: Path, ctx: ScenarioContext) -> subprocess.CompletedProcess:
+        import tempfile, shutil
+
+        with tempfile.TemporaryDirectory() as tmp:
+            batch_file = str(Path(tmp) / "test.batch")
+            staging    = str(Path(tmp) / "staging")
+
+            # Step 1: write batch (local sync into a throw-away staging dir)
+            proc1 = _run(
+                [ctx.rsync_rs, *flags, f"--write-batch={batch_file}",
+                 f"{src}/", staging],
+                ctx, timeout=ctx.timeout_s,
+            )
+            if proc1.returncode != 0:
+                return proc1
+
+            # Step 2: apply batch to the real dst
+            proc2 = _run(
+                [ctx.rsync_rs, *flags, f"--read-batch={batch_file}", f"{dst}/"],
+                ctx, timeout=ctx.timeout_s,
+            )
+            return proc2
+    return go
+
+
+def make_sync_backup_dir(flags: Sequence[str], backup_subdir: str = "bak") -> SyncCallable:
+    """Local sync with --backup --backup-dir=<sibling_dir>.
+
+    Creates a sibling directory next to dst (named `backup_subdir`) and
+    passes ``--backup-dir=<that path>`` to rsync-rs.  Callers can verify
+    the backup landed there via ``verify_dst``.
+    """
+    def go(src: Path, dst: Path, ctx: ScenarioContext) -> subprocess.CompletedProcess:
+        bak = dst.parent / backup_subdir
+        bak.mkdir(exist_ok=True)
+        return _run(
+            [ctx.rsync_rs, *flags, f"--backup-dir={bak}", f"{src}/", f"{dst}/"],
+            ctx, timeout=ctx.timeout_s,
+        )
+    return go
+
 # ───────────────────────── Runner ───────────────────────────────────────────
 
 

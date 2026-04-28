@@ -25,7 +25,8 @@ Legend: ✅ implemented · ⚠️ partial · ❌ not yet
 | Delta | Rolling+strong block matching | ✅ | |
 | | Compression `-z` (zlib token) | ✅ | Negotiates `none` if peer disagrees |
 | | `--inplace`, `--append`, `--partial` | ⚠️ | `--inplace` works; `--partial-dir`/`--temp-dir` not wired |
-| | `--backup`, `--write-batch`, `--read-batch` | ❌ | |
+| | `--write-batch`, `--read-batch` | ✅ | rsync-rs native `RSYNBAT1` format; not C-compatible |
+| | `--backup`, `--backup-dir`, `--suffix` | ✅ | In-place `~` suffix or separate backup-dir; local mode |
 | Output | `-v`, `-vv`, `--progress`, `--stats` | ✅ | Stream/format match C rsync |
 | | `--itemize-changes` (`-i`) | ✅ | 11-char format |
 | | `--list-only` | ✅ | |

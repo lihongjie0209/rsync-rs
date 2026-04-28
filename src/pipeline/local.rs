@@ -307,6 +307,12 @@ fn copy_entry(
         return Ok(());
     }
 
+    // --backup: if dest already exists, move/copy it to the backup location
+    // before we overwrite it.
+    if opts.backup && dest.exists() {
+        backup_file(opts, dest)?;
+    }
+
     if ft.is_symlink() {
         copy_symlink(src, dest)?;
         // Don't run apply_file_meta on a symlink — set_permissions on Linux
@@ -348,6 +354,54 @@ fn dest_meta_in_sync(dest_meta: Option<&fs::Metadata>, src_meta: &fs::Metadata) 
         (Ok(a), Ok(b)) => a == b,
         _ => false,
     }
+}
+
+/// Rename (or copy) `dest` to its backup path before it is overwritten.
+///
+/// With `--backup-dir=DIR`: dest is copied to `DIR/rel_path` (relative to
+/// the transfer root — we approximate this with just the filename).
+/// Without `--backup-dir`: a suffix is appended in-place.  Default suffix
+/// is `~` (matching C rsync's default) unless `--backup-dir` is set, in
+/// which case the default suffix is empty (C rsync behaviour).
+fn backup_file(opts: &Options, dest: &Path) -> Result<()> {
+    // C rsync default: "~" when no --backup-dir, "" when --backup-dir is set.
+    let suffix = opts.suffix.as_deref().unwrap_or(
+        if opts.backup_dir.is_some() { "" } else { "~" }
+    );
+
+    if let Some(backup_dir) = &opts.backup_dir {
+        // Copy into <backup_dir>/<original_filename><suffix>
+        let backup_base = dest
+            .file_name()
+            .map(|n| {
+                let mut s = n.to_os_string();
+                s.push(suffix);
+                s
+            })
+            .unwrap_or_else(|| std::ffi::OsString::from(suffix));
+        let backup_path = Path::new(backup_dir).join(backup_base);
+        if let Some(parent) = backup_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("backup_dir create_dir_all {parent:?}"))?;
+            }
+        }
+        fs::copy(dest, &backup_path)
+            .with_context(|| format!("backup copy {dest:?} -> {backup_path:?}"))?;
+    } else {
+        // In-place backup: rename dest to dest+suffix
+        let backup_path = {
+            let mut s = dest.as_os_str().to_os_string();
+            s.push(suffix);
+            PathBuf::from(s)
+        };
+        // On some platforms rename to itself is a no-op / error; skip if same.
+        if backup_path != dest {
+            fs::rename(dest, &backup_path)
+                .with_context(|| format!("backup rename {dest:?} -> {backup_path:?}"))?;
+        }
+    }
+    Ok(())
 }
 
 /// Copy extended attributes from src to dest.  Best-effort — silently ignores

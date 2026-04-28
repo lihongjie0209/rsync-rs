@@ -241,6 +241,10 @@ impl Options {
     /// Extract (sources, destination) from self.args.
     /// Returns error if fewer than 2 args.
     pub fn parse_paths(&self) -> Result<(Vec<String>, String)> {
+        // --read-batch only needs a destination (no source)
+        if self.read_batch.is_some() && self.args.len() == 1 {
+            return Ok((vec![], self.args[0].clone()));
+        }
         if self.args.len() < 2 {
             bail!(
                 "need at least 2 arguments (source and destination), got {}",
