@@ -445,8 +445,12 @@ pub fn run_server_receiver<R: Read, W: Write>(
         if protocol >= 30 { write_ndx(&mut writer, NDX_DONE)?; } else { write_int(&mut writer, NDX_DONE)?; }
         writer.flush().ok();
     }
-    // Drain sender.c:464 final NDX_DONE if present (best-effort).
-    let _ = if protocol >= 30 { read_ndx(&mut reader).ok() } else { read_int(&mut reader).ok() };
+    // For proto < 31 the sender.c:464 NDX_DONE hasn't been consumed above (the
+    // proto->=31 block did it at line 444); drain it here so the caller's stats
+    // reads start at the actual stat varlong B1.
+    if protocol < 31 {
+        let _ = if protocol >= 30 { read_ndx(&mut reader).ok() } else { read_int(&mut reader).ok() };
+    }
 
     Ok(stats)
 }

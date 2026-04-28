@@ -13,7 +13,7 @@ Legend: ✅ implemented · ⚠️ partial · ❌ not yet
 | Transport | Local mode (`SRC DST`) | ✅ | Files, dirs, symlinks, hardlinks, perms, mtimes |
 | | Remote shell (`-e ssh`, `host:path`) | ✅ | Protocol 31, both directions |
 | | Daemon **server** (`--daemon`, `rsyncd.conf`) | ✅ | `@RSYNCD:` greeting, modules, list, pull, push (read-only off), fork-per-connection on Unix |
-| | Daemon **client** (`rsync://host/MOD/path`) | ❌ | Returns clean error; planned (see [`AUDIT.md` §4.1](AUDIT.md)) |
+| | Daemon **client** (`rsync://host/MOD/path`) | ✅ | Push and pull against C rsync 3.2.7 daemon verified |
 | Wire format | Protocol versions 27–31, varint flist, MD5 strong sum, checksum-list negotiation | ✅ | |
 | | Inc-recurse (`CF_INC_RECURSE`) | ❌ | Falls back to non-incremental flist |
 | | Multiplexed I/O (`MSG_DATA/INFO/ERR`) | ✅ | |
@@ -44,11 +44,11 @@ mock.
 | Direction | Local | rsh / SSH | Daemon (`rsync://`) |
 |---|---|---|---|
 | **rs ↔ rs** (rsync-rs ↔ rsync-rs) | ✅ Linux · ✅ macOS · ✅ Windows | ✅ Linux · ✅ Windows (OpenSSH) | ✅ Linux self-loop · ✅ Windows self-loop |
-| **rs → C** (rs client → C server, push) | n/a | ⚠️ Linux: 1/4 fail (`text_files`) — known | ❌ rs client lacks `rsync://` transport |
-| **rs ← C** (rs client ← C server, pull) | n/a | ⚠️ Linux: 1/4 fail (`text_files`) — known | ❌ rs client lacks `rsync://` transport |
+| **rs → C** (rs client → C server, push) | n/a | ⚠️ Linux: 1/4 fail (`text_files`) — known | ✅ Verified against C rsync 3.2.7 daemon (Docker) |
+| **rs ← C** (rs client ← C server, pull) | n/a | ⚠️ Linux: 1/4 fail (`text_files`) — known | ✅ Verified against C rsync 3.2.7 daemon (Docker) |
 | **C → rs** (C client → rs server, push) | n/a | ✅ Linux | ✅ Linux daemon receiver |
 | **C ← rs** (C client ← rs server, pull) | n/a | ✅ Linux | ✅ Linux daemon sender, list, file pull |
-| **rs (Windows) ↔ C (Linux)** | n/a | ⚠️ Same gaps as rs↔C above | ❌ Pending rs daemon-client port |
+| **rs (Windows) ↔ C (Linux)** | n/a | ✅ SSH push+pull verified (Windows OpenSSH → Docker C rsync) | ✅ Daemon push+pull verified (Windows → Docker C rsync 3.2.7) |
 
 CI matrix per push (`.github/workflows/ci.yml`):
 
@@ -67,10 +67,7 @@ Tracked in [`AUDIT.md` §4.1](AUDIT.md):
 1. **rs ↔ C 3.2.7 over rsh** — `text_files` and `single_small`/`nested_tree`
    scenarios fail with `flist.c(786) protocol incompatibility` or hang.
    Suspect missing handling of an XMIT flag emitted by 3.2.7's flist phase.
-2. **`rsync://` client transport** — rsync-rs as a client given a
-   `rsync://` URL bails with a clear error.  Implementing this is ~80 LoC
-   (port of C's `start_inband_exchange`); see issue tracker.
-3. **No AUTHREQD support** in the daemon server — modules with
+2. **No AUTHREQD support** in the daemon server — modules with
    `auth users`/`secrets file` are not honored.
 
 ## Building
