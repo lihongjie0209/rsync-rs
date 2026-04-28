@@ -337,6 +337,12 @@ def _wait_listen(port: int, deadline_s: float = 2.0) -> bool:
     return False
 
 
+def _have_rsync_daemon(ctx: "ScenarioContext") -> bool:
+    """Return True if the C rsync binary is available to use as a daemon."""
+    import shutil
+    return shutil.which(ctx.rsync_c) is not None
+
+
 def _free_port() -> int:
     import socket
     s = socket.socket(); s.bind(("127.0.0.1", 0))
@@ -412,6 +418,8 @@ def check_daemon_rs_push_to_c() -> Scenario:
                 f"pid file = {pid}\n"
                 f"log file = {log}\n"
                 f"use chroot = no\n"
+                f"uid = root\n"
+                f"gid = root\n"
                 f"\n[upload]\n"
                 f"  path = {mod_dir}\n"
                 f"  read only = no\n"

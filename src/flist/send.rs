@@ -9,11 +9,12 @@ use crate::io::varint::{
     write_byte, write_int, write_shortint, write_varlong, write_varint, write_varint30,
 };
 use crate::protocol::constants::{
-    CF_INC_RECURSE, CF_VARINT_FLIST_FLAGS, XMIT_EXTENDED_FLAGS, XMIT_IO_ERROR_ENDLIST,
-    XMIT_LONG_NAME, XMIT_MOD_NSEC, XMIT_SAME_GID, XMIT_SAME_MODE, XMIT_SAME_NAME, XMIT_SAME_TIME,
-    XMIT_SAME_UID,
+    CF_INC_RECURSE, CF_VARINT_FLIST_FLAGS, XMIT_EXTENDED_FLAGS, XMIT_HLINK_FIRST, XMIT_HLINKED,
+    XMIT_IO_ERROR_ENDLIST, XMIT_LONG_NAME, XMIT_MOD_NSEC, XMIT_SAME_GID, XMIT_SAME_MODE,
+    XMIT_SAME_NAME, XMIT_SAME_TIME, XMIT_SAME_UID,
 };
 use crate::protocol::types::{FileInfo, FileList, FileType};
+use crate::protocol::constants::{FLAG_HLINKED, FLAG_HLINK_FIRST, FLAG_TOP_DIR};
 
 /// Transmit the complete file list.
 ///
@@ -179,7 +180,29 @@ fn send_file_entry<W: Write>(
         xflags |= XMIT_MOD_NSEC;
     }
 
+    // ── hardlink flags ────────────────────────────────────────────────────
+    // For protocol 30+ we encode hardlink group membership in XMIT_HLINKED.
+    // Non-first members (followers) skip all metadata after the name.
+    let is_hlink_member = (fi.flags & FLAG_HLINKED) != 0;
+    let is_hlink_leader = (fi.flags & FLAG_HLINK_FIRST) != 0;
+    let is_hlink_follower = is_hlink_member && !is_hlink_leader && fi.hard_link_first_ndx >= 0;
+
+    if is_hlink_member && protocol >= 28 {
+        xflags |= XMIT_HLINKED;
+        if is_hlink_leader && protocol >= 30 {
+            xflags |= XMIT_HLINK_FIRST;
+        }
+    }
+
     // ── write flags ───────────────────────────────────────────────────────
+    // Top-level directory ('.') must carry XMIT_TOP_DIR so the C rsync
+    // receiver sets FLAG_TOP_DIR (and FLAG_CONTENT_DIR for proto < 30).
+    let is_top_dir_entry = (fi.flags & FLAG_TOP_DIR) != 0
+        && matches!(FileType::from_mode(fi.mode), FileType::Dir);
+    if is_top_dir_entry {
+        xflags |= crate::protocol::constants::XMIT_TOP_DIR;
+    }
+
     if varint_flags {
         // Varint path: a 0 flags would be misread as the end-of-list marker,
         // so disambiguate by setting XMIT_EXTENDED_FLAGS.
@@ -216,6 +239,15 @@ fn send_file_entry<W: Write>(
         write_byte(w, rest_len as u8)?;
     }
     w.write_all(rest.as_bytes())?;
+
+    // ── hardlink follower: write ref index then stop ──────────────────────
+    // For protocol 30+ non-first members the wire format is just:
+    //   xflags + name + first_hlink_ndx (varint)
+    // All metadata is omitted — the receiver copies it from the first entry.
+    if is_hlink_follower && protocol >= 30 {
+        write_varint(w, fi.hard_link_first_ndx)?;
+        return Ok(());
+    }
 
     // ── file length ───────────────────────────────────────────────────────
     write_varlong(w, fi.size, 3)?;
@@ -408,5 +440,60 @@ mod tests {
 
         let got = recv_file_list(&mut buf.as_slice(), 31, 0).unwrap();
         assert_eq!(got.files[0].mod_nsec, 123_456_789);
+    }
+
+    #[test]
+    fn roundtrip_hardlink_group() {
+        use crate::protocol::constants::{FLAG_HLINKED, FLAG_HLINK_FIRST};
+
+        // Simulate a hardlink group: orig.txt (leader) + link1.txt + link2.txt,
+        // all with the same size/mtime/mode.  Also alone.txt is not hardlinked.
+        let mut flist = FileList::new();
+        flist.files.push(reg_file("alone.txt", 5, 1000));
+        let mut leader = reg_file("orig.txt", 14, 2000);
+        leader.flags = FLAG_HLINKED | FLAG_HLINK_FIRST;
+        flist.files.push(leader);
+        // link1.txt is sorted before orig.txt alphabetically → becomes wire entry 1
+        // but in flist.files it is pushed at index 2; after sort its wire position
+        // must be > orig.txt's wire position.  We bypass mark_hardlinks here and
+        // assign indices manually to simulate a fully-prepared flist.
+        let mut link1 = reg_file("orig_link1.txt", 14, 2000);
+        link1.flags = FLAG_HLINKED;
+        link1.hard_link_first_ndx = 1; // wire position of orig.txt (after sort: alone=0, orig=1, orig_link1=2, orig_link2=3)
+        flist.files.push(link1);
+        let mut link2 = reg_file("orig_link2.txt", 14, 2000);
+        link2.flags = FLAG_HLINKED;
+        link2.hard_link_first_ndx = 1;
+        flist.files.push(link2);
+        flist_sort(&mut flist);
+
+        let mut buf = Vec::<u8>::new();
+        send_file_list(&mut buf, &flist, 31, 0, 0).unwrap();
+
+        let got = recv_file_list(&mut buf.as_slice(), 31, 0).unwrap();
+        assert_eq!(got.files.len(), 4);
+
+        // Find entries by path.
+        let entry = |path: &str| got.files.iter().find(|f| f.path() == path).unwrap();
+
+        // Leader has no reference.
+        let orig = entry("orig.txt");
+        assert_eq!(orig.hard_link_first_ndx, -1);
+        assert_eq!(orig.size, 14);
+        assert_eq!(orig.modtime, 2000);
+
+        // Followers reference wire index 1 (orig.txt's position).
+        let l1 = entry("orig_link1.txt");
+        assert_eq!(l1.hard_link_first_ndx, 1);
+        assert_eq!(l1.size, 14);   // copied from leader
+        assert_eq!(l1.modtime, 2000);
+
+        let l2 = entry("orig_link2.txt");
+        assert_eq!(l2.hard_link_first_ndx, 1);
+
+        // alone.txt is untouched.
+        let alone = entry("alone.txt");
+        assert_eq!(alone.hard_link_first_ndx, -1);
+        assert_eq!(alone.size, 5);
     }
 }

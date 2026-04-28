@@ -254,7 +254,7 @@ fn handle_connection(
     //    "<module>/" prefix from path args after the dot-separator, so do the
     //    same here -- otherwise paths like "upload/" resolve under the
     //    already-chdir'd module dir and the receiver writes nowhere.
-    let mut args: Vec<String> = vec!["rsyncd".to_string()];
+    let mut args: Vec<String> = Vec::new();
     {
         use std::io::Read;
         let mut byte = [0u8; 1];
@@ -271,19 +271,20 @@ fn handle_connection(
                 }
                 let mut s = String::from_utf8_lossy(&cur).into_owned();
                 if seen_dot {
-                    // C clients sometimes embed the module name itself in the
-                    // path arg (e.g. push to bare module: "upload/" or
-                    // "upload").  After we chdir into module.path, that
-                    // prefix would resolve to a non-existent subdir.  Strip
-                    // ONLY when the entire arg is the module name (with or
-                    // without a trailing slash) -- mirrors the empty-dir
-                    // case of C's util1.c::glob_expand_module.  Do NOT
-                    // strip from inside the path (e.g. "upload/foo.txt"):
-                    // C clients already strip the leading "MOD/" themselves
-                    // for sub-paths in pull and push, so a stripped-here
-                    // sub-path would become incorrect.
-                    if s == module.name || s == format!("{}/", module.name) {
+                    // C rsync client sends path args with the module name as a
+                    // leading prefix (e.g. "data/hello.txt" for module "data").
+                    // After we chdir into module.path those prefixed paths would
+                    // resolve one level too deep.  Strip the module prefix here
+                    // so that "data" → ".", "data/" → ".", "data/foo" → "foo".
+                    let prefix = format!("{}/", module.name);
+                    if s == module.name || s == prefix.trim_end_matches('/') {
                         s = ".".to_string();
+                    } else if let Some(rest) = s.strip_prefix(&prefix) {
+                        if !rest.is_empty() {
+                            s = rest.to_string();
+                        } else {
+                            s = ".".to_string();
+                        }
                     }
                 }
                 if s == "." {

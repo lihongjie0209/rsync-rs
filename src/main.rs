@@ -744,6 +744,13 @@ pub fn run_server_io<R: std::io::Read, W: std::io::Write>(
         for src in &src_paths {
             let path = std::path::Path::new(src);
             if path.is_dir() {
+                // Add the root '.' directory entry first so C rsync runs
+                // delete_in_dir() for the root (FLAG_CONTENT_DIR via XMIT_TOP_DIR).
+                if let Ok(meta) = path.metadata() {
+                    let mut root_fi = file_info_from_meta(".", None, &meta);
+                    root_fi.flags |= crate::protocol::constants::FLAG_TOP_DIR;
+                    flist.files.push(root_fi);
+                }
                 walk_source_dir(path, "", recursive, &mut flist);
             } else if let Ok(meta) = std::fs::metadata(path) {
                 let name =
@@ -752,9 +759,16 @@ pub fn run_server_io<R: std::io::Read, W: std::io::Write>(
             }
         }
         crate::flist::flist_sort(&mut flist);
+        crate::rdebug!("[rsync-rs] mark_hardlinks: hard_links={}", server_flags.hard_links);
+        if std::env::var_os("RSYNC_RS_DEBUG").is_some() {
+            for (i, fi) in flist.files.iter().enumerate() {
+                crate::rdebug!("[rsync-rs]   pre-mark[{}] {:?} ino={} dev={}", i, fi.path(), fi.ino, fi.dev);
+            }
+        }
+        mark_hardlinks(&mut flist, server_flags.hard_links);
         crate::rdebug!("[rsync-rs] flist has {} files", flist.files.len());
         for (i, fi) in flist.files.iter().enumerate() {
-            crate::rdebug!("[rsync-rs]   sorted[{}] = {:?}", i, fi.path());
+            crate::rdebug!("[rsync-rs]   sorted[{}] = {:?} flags=0x{:x} hlink_ndx={}", i, fi.path(), fi.flags, fi.hard_link_first_ndx);
         }
 
         // Step 7: Send file list (through multiplexed output).
@@ -1232,6 +1246,13 @@ fn run_client_protocol<R: std::io::Read, W: std::io::Write>(
             let p = std::path::Path::new(src);
             let recursive = opts.recursive;
             if p.is_dir() {
+                // Add the root '.' directory entry so C rsync runs
+                // delete_in_dir() for the root when --delete is active.
+                if let Ok(meta) = p.metadata() {
+                    let mut root_fi = file_info_from_meta(".", None, &meta);
+                    root_fi.flags |= crate::protocol::constants::FLAG_TOP_DIR;
+                    flist.files.push(root_fi);
+                }
                 walk_source_dir(p, "", recursive, &mut flist);
             } else if let Ok(meta) = p.symlink_metadata() {
                 let name =
@@ -1246,6 +1267,7 @@ fn run_client_protocol<R: std::io::Read, W: std::io::Write>(
             }
         }
         crate::flist::flist_sort(&mut flist);
+        mark_hardlinks(&mut flist, opts.hard_links);
 
         if opts.verbose >= 1 {
             println!("sending incremental file list");
@@ -1358,6 +1380,54 @@ fn read_int_or_ndx<R: std::io::Read>(r: &mut R, protocol: u32) -> Result<i32> {
 
 // ── File-info helpers ─────────────────────────────────────────────────────────
 
+/// After flist_sort, group regular files by (dev, ino) and mark hardlink
+/// leader/follower relationships.  Only runs on Unix and only when `hard_links`
+/// is true.
+///
+/// Leaders get `FLAG_HLINKED | FLAG_HLINK_FIRST`; followers get `FLAG_HLINKED`
+/// and `hard_link_first_ndx` set to the wire index of their leader
+/// (`flist.ndx_start + leader_wire_pos`).
+fn mark_hardlinks(flist: &mut crate::protocol::types::FileList, hard_links: bool) {
+    if !hard_links {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::collections::HashMap;
+        use crate::protocol::constants::{FLAG_HLINKED, FLAG_HLINK_FIRST};
+
+        // Group wire positions by (dev, ino).  We only care about regular files.
+        let mut groups: HashMap<(u64, u64), Vec<usize>> = HashMap::new();
+        for wire_pos in 0..flist.sorted.len() {
+            let idx = flist.sorted[wire_pos];
+            let fi = &flist.files[idx];
+            if !fi.is_regular() || fi.ino == 0 {
+                continue;
+            }
+            groups.entry((fi.dev, fi.ino)).or_default().push(wire_pos);
+        }
+
+        // For groups with 2+ members, assign hardlink flags.
+        for (_, mut positions) in groups {
+            if positions.len() < 2 {
+                continue;
+            }
+            positions.sort_unstable();
+            let leader_wire_pos = positions[0] as i32;
+            for (i, wire_pos) in positions.iter().enumerate() {
+                let idx = flist.sorted[*wire_pos];
+                if i == 0 {
+                    flist.files[idx].flags |= FLAG_HLINKED | FLAG_HLINK_FIRST;
+                } else {
+                    flist.files[idx].flags |= FLAG_HLINKED;
+                    flist.files[idx].hard_link_first_ndx =
+                        flist.ndx_start + leader_wire_pos;
+                }
+            }
+        }
+    }
+}
+
 /// Walk a source directory adding entries to the flist.
 ///
 /// `prefix` is the relative path prefix to prepend (empty for the root call).
@@ -1432,12 +1502,12 @@ fn file_info_from_meta(
     meta: &std::fs::Metadata,
 ) -> crate::protocol::types::FileInfo {
     #[cfg(unix)]
-    let (mode, uid, gid, modtime) = {
+    let (mode, uid, gid, modtime, dev, ino) = {
         use std::os::unix::fs::MetadataExt;
-        (meta.mode(), meta.uid(), meta.gid(), meta.mtime())
+        (meta.mode(), meta.uid(), meta.gid(), meta.mtime(), meta.dev(), meta.ino())
     };
     #[cfg(not(unix))]
-    let (mode, uid, gid, modtime) = {
+    let (mode, uid, gid, modtime, dev, ino) = {
         let modtime = meta
             .modified()
             .ok()
@@ -1445,7 +1515,7 @@ fn file_info_from_meta(
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let mode = if meta.is_dir() { 0o040755u32 } else { 0o100644u32 };
-        (mode, 0u32, 0u32, modtime)
+        (mode, 0u32, 0u32, modtime, 0u64, 0u64)
     };
 
     crate::protocol::types::FileInfo {
@@ -1456,6 +1526,8 @@ fn file_info_from_meta(
         mode,
         uid,
         gid,
+        dev,
+        ino,
         ..Default::default()
     }
 }
