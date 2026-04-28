@@ -58,6 +58,127 @@ fn print_version() {
     );
 }
 
+/// Print a help block whose layout mirrors C rsync's `help-rsync.h` —
+/// the version banner, the `Usage:` block, then a flat `--long, -X
+/// description` option list.  We only advertise options that rsync-rs
+/// actually implements; flags accepted but not yet honoured are marked
+/// `(stub)`, and entries unique to rsync-rs are tagged accordingly.
+fn print_help() {
+    print_version();
+    print!(
+        "\n\
+         rsync is a file transfer program capable of efficient remote update\n\
+         via a fast differencing algorithm.\n\
+         \n\
+         Usage: rsync [OPTION]... SRC [SRC]... DEST\n\
+         \x20 or   rsync [OPTION]... SRC [SRC]... [USER@]HOST:DEST\n\
+         \x20 or   rsync [OPTION]... SRC [SRC]... [USER@]HOST::DEST\n\
+         \x20 or   rsync [OPTION]... SRC [SRC]... rsync://[USER@]HOST[:PORT]/DEST\n\
+         \x20 or   rsync [OPTION]... [USER@]HOST:SRC [DEST]\n\
+         \x20 or   rsync [OPTION]... [USER@]HOST::SRC [DEST]\n\
+         \x20 or   rsync [OPTION]... rsync://[USER@]HOST[:PORT]/SRC [DEST]\n\
+         The ':' usages connect via remote shell, while '::' & 'rsync://' usages connect\n\
+         to an rsync daemon, and require SRC or DEST to start with a module name.\n\
+         \n\
+         Options\n"
+    );
+    // Each line: '--long, -X' (or just '--long') padded to col 25, then text.
+    // Mirrors the column layout in C rsync's help-rsync.h.
+    let lines: &[&str] = &[
+        "--verbose, -v            increase verbosity",
+        "--quiet, -q              suppress non-error messages",
+        "--checksum, -c           skip based on checksum, not mod-time & size",
+        "--archive, -a            archive mode is -rlptgoD (no -A,-X,-U,-N,-H)",
+        "--recursive, -r          recurse into directories",
+        "--relative, -R           use relative path names",
+        "--no-implied-dirs        don't send implied dirs with --relative",
+        "--backup, -b             make backups (see --suffix & --backup-dir)",
+        "--backup-dir=DIR         make backups into hierarchy based in DIR",
+        "--suffix=SUFFIX          backup suffix (default ~ w/o --backup-dir)",
+        "--update, -u             skip files that are newer on the receiver",
+        "--inplace                update destination files in-place",
+        "--append                 append data onto shorter files",
+        "--mkpath                 create destination's missing path components",
+        "--links, -l              copy symlinks as symlinks",
+        "--copy-links, -L         transform symlink into referent file/dir",
+        "--copy-dirlinks, -k      transform symlink to dir into referent dir",
+        "--keep-dirlinks, -K      treat symlinked dir on receiver as dir",
+        "--hard-links, -H         preserve hard links",
+        "--perms, -p              preserve permissions",
+        "--executability, -E      preserve executability",
+        "--acls, -A               preserve ACLs (stub: parsed, not applied)",
+        "--xattrs, -X             preserve extended attributes (stub: parsed, not applied)",
+        "--owner, -o              preserve owner (super-user only)",
+        "--group, -g              preserve group",
+        "--devices                preserve device files (super-user only)",
+        "--specials               preserve special files",
+        "-D                       same as --devices --specials",
+        "--times, -t              preserve modification times",
+        "--omit-dir-times, -O     omit directories from --times",
+        "--omit-link-times        omit symlinks from --times",
+        "--dry-run, -n            perform a trial run with no changes made",
+        "--whole-file, -W         copy files whole (w/o delta-xfer algorithm)",
+        "--no-whole-file          force the delta-xfer algorithm",
+        "--checksum-choice=STR    choose the checksum algorithm",
+        "--one-file-system        don't cross filesystem boundaries",
+        "--rsh=COMMAND, -e        specify the remote shell to use",
+        "--rsync-path=PROGRAM     specify the rsync to run on remote machine",
+        "--ignore-existing        skip updating files that exist on receiver",
+        "--ignore-non-existing    skip files that don't exist on receiver (rsync-rs)",
+        "--remove-source-files    sender removes synchronized files (non-dir)",
+        "--delete                 delete extraneous files from dest dirs",
+        "--delete-before          receiver deletes before xfer, not during",
+        "--delete-during          receiver deletes during the transfer",
+        "--delete-after           receiver deletes after transfer, not during",
+        "--delete-excluded        also delete excluded files from dest dirs",
+        "--ignore-errors          delete even if there are I/O errors",
+        "--force                  force deletion of dirs even if not empty",
+        "--max-delete=NUM         don't delete more than NUM files",
+        "--max-size=SIZE          don't transfer any file larger than SIZE",
+        "--min-size=SIZE          don't transfer any file smaller than SIZE",
+        "--partial                keep partially transferred files",
+        "--partial-dir=DIR        put a partially transferred file into DIR",
+        "--prune-empty-dirs, -m   prune empty directory chains from file-list",
+        "--numeric-ids            don't map uid/gid values by user/group name",
+        "--timeout=SECONDS        set I/O timeout in seconds",
+        "--fuzzy, -y              find similar file for basis if no dest file",
+        "--compress, -z           compress file data during the transfer",
+        "--compress-level=NUM     explicitly set compression level",
+        "--cvs-exclude, -C        auto-ignore files in the same way CVS does",
+        "--filter=RULE, -f        add a file-filtering RULE",
+        "-F                       same as --filter='dir-merge /.rsync-filter'",
+        "--exclude=PATTERN        exclude files matching PATTERN",
+        "--exclude-from=FILE      read exclude patterns from FILE",
+        "--include=PATTERN        don't exclude files matching PATTERN",
+        "--include-from=FILE      read include patterns from FILE",
+        "--port=PORT              specify double-colon alternate port number",
+        "--stats                  give some file-transfer stats",
+        "--progress               show progress during transfer",
+        "-P                       same as --partial --progress",
+        "--itemize-changes, -i    output a change-summary for all updates",
+        "--list-only              list the files instead of copying them",
+        "--bwlimit=RATE           limit socket I/O bandwidth",
+        "--write-batch=FILE       write a batched update to FILE (stub)",
+        "--read-batch=FILE        read a batched update from FILE (stub)",
+        "--protocol=NUM           force an older protocol version to be used",
+        "--daemon                 run as an rsync daemon",
+        "--config=FILE            specify alternate rsyncd.conf file",
+        "--no-detach              do not detach from the parent (daemon mode)",
+        "--version, -V            print the version + other info and exit",
+        "--help, -h               show this help",
+    ];
+    for l in lines {
+        // C rsync indents each option line with a single leading space.
+        println!(" {l}");
+    }
+    print!(
+        "\n\
+         Use \"rsync --daemon --help\" to see the daemon-mode command-line options.\n\
+         Please see the rsync(1) and rsyncd.conf(5) manpages for full documentation.\n\
+         See https://github.com/lihongjie0209/rsync-rs for rsync-rs-specific notes.\n"
+    );
+}
+
 // ── Stats output ──────────────────────────────────────────────────────────────
 
 /// Emit the `Number of files: N (reg: A, dir: B, ...)` line that C rsync's
@@ -1117,9 +1238,18 @@ fn file_info_from_meta(
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
-    // Check --version before clap so we control the exact output format.
-    if std::env::args().any(|a| a == "--version") {
+    // Intercept --version and --help/-h before clap, so we can produce the
+    // exact text that C rsync emits.  Note that C rsync only treats "-h"
+    // as help when it is the sole argument; otherwise it means
+    // --human-readable.  We follow the same rule.
+    let raw: Vec<String> = std::env::args().collect();
+    if raw.iter().any(|a| a == "--version" || a == "-V") {
         print_version();
+        std::process::exit(0);
+    }
+    let lone_h = raw.len() == 2 && raw[1] == "-h";
+    if raw.iter().any(|a| a == "--help") || lone_h {
+        print_help();
         std::process::exit(0);
     }
 

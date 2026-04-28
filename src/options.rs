@@ -3,7 +3,12 @@
 use anyhow::{bail, Result};
 
 #[derive(Debug, Clone, Default, clap::Parser)]
-#[command(name = "rsync-rs", about = "A Rust rsync implementation")]
+#[command(
+    name = "rsync-rs",
+    about = "A Rust rsync implementation",
+    disable_help_flag = true,
+    disable_version_flag = true,
+)]
 pub struct Options {
     // Verbosity
     #[arg(short = 'v', long, action = clap::ArgAction::Count)]
