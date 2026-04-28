@@ -523,6 +523,99 @@ fn recv_filter_list<R: std::io::Read>(reader: &mut R) -> Result<()> {
     Ok(())
 }
 
+/// Delete files in `dest_dir` that are not present in `flist`.
+///
+/// Builds a keep-set from every flist entry plus all their ancestor directories
+/// (so that `sub/a.txt` in the flist keeps the `sub/` directory alive), then
+/// walks `dest_dir` and removes anything not in that set.
+///
+/// Returns `(deleted_files, deleted_dirs, deleted_symlinks)`.
+fn delete_extraneous_from_flist(
+    flist: &crate::protocol::types::FileList,
+    dest_dir: &std::path::Path,
+    verbose: u8,
+    dry_run: bool,
+) -> (i32, i32, i32) {
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    // Build keep-set: every flist path + all its ancestor directories.
+    // Paths in flist use '/' as separator; normalize to OS separator for matching.
+    let mut kept: HashSet<PathBuf> = HashSet::new();
+    for fi in &flist.files {
+        let raw = fi.path();
+        if raw == "." || raw.is_empty() {
+            continue;
+        }
+        let p = PathBuf::from(raw.replace('/', std::path::MAIN_SEPARATOR_STR));
+        // Add all ancestors so no containing directory is deleted.
+        let mut cur = p.as_path();
+        loop {
+            kept.insert(cur.to_path_buf());
+            match cur.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => cur = parent,
+                _ => break,
+            }
+        }
+    }
+
+    let mut del_files = 0i32;
+    let mut del_dirs = 0i32;
+    let mut del_symlinks = 0i32;
+
+    fn walk(
+        root: &std::path::Path,
+        cur: &std::path::Path,
+        kept: &HashSet<PathBuf>,
+        verbose: u8,
+        dry_run: bool,
+        del_files: &mut i32,
+        del_dirs: &mut i32,
+        del_symlinks: &mut i32,
+    ) {
+        let Ok(entries) = std::fs::read_dir(cur) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let rel = match path.strip_prefix(root) {
+                Ok(r) => r.to_path_buf(),
+                Err(_) => continue,
+            };
+            if kept.contains(&rel) {
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    walk(root, &path, kept, verbose, dry_run, del_files, del_dirs, del_symlinks);
+                }
+                continue;
+            }
+            let ft = entry.file_type().ok();
+            let is_dir = ft.as_ref().map(|t| t.is_dir()).unwrap_or(false);
+            let is_symlink = ft.as_ref().map(|t| t.is_symlink()).unwrap_or(false);
+            if verbose > 0 {
+                let rel_display = rel.to_string_lossy().replace('\\', "/");
+                println!("deleting {rel_display}");
+            }
+            if !dry_run {
+                if is_dir {
+                    let _ = std::fs::remove_dir_all(&path);
+                } else {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+            if is_dir {
+                *del_dirs += 1;
+            } else if is_symlink {
+                *del_symlinks += 1;
+            } else {
+                *del_files += 1;
+            }
+        }
+    }
+
+    walk(dest_dir, dest_dir, &kept, verbose, dry_run, &mut del_files, &mut del_dirs, &mut del_symlinks);
+    (del_files, del_dirs, del_symlinks)
+}
+
 /// Run as the server side of an rsync connection (invoked via remote shell).
 pub fn run_server(opts: &Options) -> Result<Stats> {
     // C rsync sets stdin/stdout to non-blocking before spawning the server.
@@ -722,10 +815,15 @@ pub fn run_server_io<R: std::io::Read, W: std::io::Write>(
         unsafe { log_mod::set_who("receiver") };
         crate::rdebug!("[rsync-rs] receiver: starting recv_file_list");
 
-        // NOTE: C's send_filter_list skips sending entirely when am_sender &&
-        // !receiver_wants_list (no --delete / --prune-empty-dirs). For -av
-        // push there is no filter list on the wire, so we must NOT block
-        // reading one. (TODO: enable when delete-mode is supported.)
+        // When --delete is active, receiver_wants_list=1 on both sides:
+        // the client (sender) sends a filter list before the flist and we
+        // must drain it here.  Without --delete the client sends nothing,
+        // so we must not block on a read.
+        let server_flags_delete = server_flags.delete;
+        if server_flags_delete {
+            crate::rdebug!("[rsync-rs] receiver: draining filter list (delete mode)");
+            recv_filter_list(&mut reader).context("recv_filter_list (push+delete)")?;
+        }
 
         // Server-receiver: server_flags / preserve already computed (Step 1b).
         let preserve = server_flags.to_preserve();
@@ -739,11 +837,22 @@ pub fn run_server_io<R: std::io::Read, W: std::io::Write>(
 
         let dest_dir =
             opts.args.last().map(std::path::Path::new).unwrap_or(std::path::Path::new("."));
-        let stats = pipeline::receiver::run_server_receiver(
+
+        // --delete: remove extraneous files from dest before transferring.
+        let (del_files, del_dirs, del_symlinks) = if server_flags_delete && dest_dir.is_dir() {
+            delete_extraneous_from_flist(&flist, dest_dir, opts.verbose, opts.dry_run)
+        } else {
+            (0, 0, 0)
+        };
+
+        let mut stats = pipeline::receiver::run_server_receiver(
             &mut reader, &mut writer, &flist, dest_dir, rsync_ct, protocol, checksum_seed,
             use_zlib, opts.inplace, opts.itemize_changes,
         )
         .context("server-receiver run")?;
+        stats.deleted_files = del_files;
+        stats.deleted_dirs = del_dirs;
+        stats.deleted_symlinks = del_symlinks;
         let _ = checksum_seed;
         if opts.stats || opts.verbose > 0 {
             print_stats(&stats, start.elapsed().as_secs_f64(), opts.stats, opts.dry_run, true);
@@ -1141,6 +1250,14 @@ fn run_client_protocol<R: std::io::Read, W: std::io::Write>(
         if opts.verbose >= 1 {
             println!("sending incremental file list");
         }
+
+        // When --delete is set, receiver_wants_list=1 and the server expects
+        // a filter list before the file list.  Send an empty one (terminator=0).
+        if opts.delete || opts.delete_before || opts.delete_during || opts.delete_after {
+            write_int(&mut writer, 0)?;
+            writer.flush().ok();
+        }
+
         crate::flist::send::send_file_list_ex(&mut writer, &flist, protocol, checksum_len, 0, preserve, compat_flags)
             .context("send_file_list")?;
         writer.flush().ok();
@@ -1193,10 +1310,24 @@ fn run_client_protocol<R: std::io::Read, W: std::io::Write>(
         let dest_path = std::path::Path::new(dest);
         let _ = std::fs::create_dir_all(dest_path);
 
+        // --delete-before: remove extraneous files from dest after receiving
+        // the flist but before transferring any data.
+        let (del_files, del_dirs, del_symlinks) =
+            if (opts.delete || opts.delete_before || opts.delete_during || opts.delete_after)
+                && dest_path.is_dir()
+            {
+                delete_extraneous_from_flist(&flist, dest_path, opts.verbose, opts.dry_run)
+            } else {
+                (0, 0, 0)
+            };
+
         let mut stats = pipeline::receiver::run_server_receiver(
             &mut reader, &mut writer, &flist, dest_path, rsync_ct, protocol, checksum_seed,
             use_zlib, opts.inplace, opts.itemize_changes,
         ).context("client-receiver run")?;
+        stats.deleted_files = del_files;
+        stats.deleted_dirs = del_dirs;
+        stats.deleted_symlinks = del_symlinks;
 
         if protocol >= 29 {
             let total_written = crate::io::varint::read_varlong(&mut reader, 3).unwrap_or(0);

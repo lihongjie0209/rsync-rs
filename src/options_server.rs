@@ -54,6 +54,7 @@ pub struct ServerFlags {
     pub one_file_system: bool,
     pub protect_args: bool,
     pub compress: bool,
+    pub delete: bool,
     /// Unrecognised characters seen in the bundled token (excluding the
     /// `-e` extension tail, which is consumed silently).
     pub unknown: String,
@@ -205,6 +206,9 @@ where
             // Long options: only ones we care about for the wire.
             match rest {
                 "numeric-ids" => { /* doesn't affect preserve booleans */ }
+                "delete" | "delete-before" | "delete-during" | "delete-after" => {
+                    flags.delete = true;
+                }
                 _ => {}
             }
         } else if s.starts_with('-') && s.len() > 1 {

@@ -44,8 +44,8 @@ mock.
 | Direction | Local | rsh / SSH | Daemon (`rsync://`) |
 |---|---|---|---|
 | **rs ↔ rs** (rsync-rs ↔ rsync-rs) | ✅ Linux · ✅ macOS · ✅ Windows | ✅ Linux · ✅ Windows (OpenSSH) | ✅ Linux self-loop · ✅ Windows self-loop |
-| **rs → C** (rs client → C server, push) | n/a | ⚠️ Linux: 1/4 fail (`text_files`) — known | ✅ Verified against C rsync 3.2.7 daemon (Docker) |
-| **rs ← C** (rs client ← C server, pull) | n/a | ⚠️ Linux: 1/4 fail (`text_files`) — known | ✅ Verified against C rsync 3.2.7 daemon (Docker) |
+| **rs → C** (rs client → C server, push) | n/a | ✅ Linux (all rsh scenarios pass in CI) | ✅ Verified against C rsync 3.2.7 daemon (Docker) |
+| **rs ← C** (rs client ← C server, pull) | n/a | ✅ Linux (all rsh scenarios pass in CI) | ✅ Verified against C rsync 3.2.7 daemon (Docker) |
 | **C → rs** (C client → rs server, push) | n/a | ✅ Linux | ✅ Linux daemon receiver |
 | **C ← rs** (C client ← rs server, pull) | n/a | ✅ Linux | ✅ Linux daemon sender, list, file pull |
 | **rs (Windows) ↔ C (Linux)** | n/a | ✅ SSH push+pull verified (Windows OpenSSH → Docker C rsync) | ✅ Daemon push+pull verified (Windows → Docker C rsync 3.2.7) |
@@ -58,16 +58,11 @@ CI matrix per push (`.github/workflows/ci.yml`):
 | `Build *` (6 targets) | Release artifacts for Linux gnu/musl, macOS, Windows |
 | `Windows smoke (native)` | rsync-rs ↔ rsync-rs on Windows via local + cwRsync rsh |
 | `Windows smoke (interop)` | rsync-rs ↔ cwRsync (Cygwin C build) on Windows |
-| `Linux interop` | 56 scenarios: local + rsh + daemon, rs↔rs and rs↔C 3.2.7 (currently 49/56 — gaps tracked in [`AUDIT.md` §4.1](AUDIT.md)) |
+| `Linux interop` | 56 scenarios: local + rsh + daemon, rs↔rs and rs↔C 3.2.7 — **56/56 pass** |
 
 ### Known interop gaps
 
-Tracked in [`AUDIT.md` §4.1](AUDIT.md):
-
-1. **rs ↔ C 3.2.7 over rsh** — `text_files` and `single_small`/`nested_tree`
-   scenarios fail with `flist.c(786) protocol incompatibility` or hang.
-   Suspect missing handling of an XMIT flag emitted by 3.2.7's flist phase.
-2. **No AUTHREQD support** in the daemon server — modules with
+1. **No AUTHREQD support** in the daemon server — modules with
    `auth users`/`secrets file` are not honored.
 
 ## Building

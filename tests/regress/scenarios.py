@@ -313,6 +313,49 @@ def all_scenarios() -> list[Scenario]:
     for fx in (fx_single_small(), fx_text_files(), fx_nested_tree()):
         sc.append(_self(f"self__{fx.name}__av", fx, ["-av"]))
 
+    # ── 6. --delete support ───────────────────────────────────────────────
+    def _make_setup_with_stale(stale_names: list[str]):
+        """Return a setup_dst that plants stale files that --delete should remove."""
+        def setup(dst: Path) -> None:
+            for name in stale_names:
+                p = dst / name
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(b"STALE_CONTENT")
+        return setup
+
+    def _make_verify_deleted(stale_names: list[str]):
+        """Return a verify_dst that checks stale files are gone."""
+        def verify(dst: Path) -> "str | None":
+            survivors = [n for n in stale_names if (dst / n).exists()]
+            if survivors:
+                return f"stale files still exist after --delete: {survivors}"
+            return None
+        return verify
+
+    _stale = ["stale.txt", "old/unwanted.bin"]
+    _setup_stale = _make_setup_with_stale(_stale)
+    _verify_stale = _make_verify_deleted(_stale)
+
+    # local --delete (already supported, regression guard)
+    sc.append(_local_only("local__delete__av", fx_text_files(), ["-av", "--delete"],
+                          setup_dst=_setup_stale, verify_dst=_verify_stale))
+
+    # rsync-rs server-sender, C client pulls with --delete
+    sc.append(_c_pulls("c_pulls__delete__av", fx_text_files(), ["-av", "--delete"],
+                       setup_dst=_setup_stale, verify_dst=_verify_stale))
+
+    # rsync-rs client pulls from C server with --delete
+    sc.append(_rs_pulls_c("rs_pulls_c__delete__av", fx_text_files(), ["-av", "--delete"],
+                          setup_dst=_setup_stale, verify_dst=_verify_stale))
+
+    # rsync-rs client pushes to C server with --delete
+    sc.append(_rs_pushes_c("rs_pushes_c__delete__av", fx_text_files(), ["-av", "--delete"],
+                           setup_dst=_setup_stale, verify_dst=_verify_stale))
+
+    # rsync-rs ↔ rsync-rs (self) with --delete
+    sc.append(_self("self__delete__av", fx_text_files(), ["-av", "--delete"],
+                    setup_dst=_setup_stale, verify_dst=_verify_stale))
+
     return sc
 
 
