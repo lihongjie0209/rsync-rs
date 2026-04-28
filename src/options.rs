@@ -188,6 +188,12 @@ pub struct Options {
     #[arg(long)]
     pub checksum_choice: Option<String>,
 
+    // Batch mode
+    #[arg(long, value_name = "FILE")]
+    pub write_batch: Option<String>,
+    #[arg(long, value_name = "FILE")]
+    pub read_batch: Option<String>,
+
     // Misc
     #[arg(long)]
     pub timeout: Option<u32>,

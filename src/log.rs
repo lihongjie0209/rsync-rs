@@ -2,6 +2,20 @@
 //!
 //! Thin wrapper around the `log` crate with rsync-style verbosity levels
 //! and a role string for the current process (sender / receiver / etc.).
+//!
+//! ## Debug tracing
+//!
+//! Two mechanisms are supported (both are zero-cost in release builds without
+//! the feature flag):
+//!
+//! * **`RSYNC_RS_DEBUG` env var** (always available): set to any non-empty value
+//!   to get `eprintln!`-style traces on stderr.
+//! * **`debug-trace` feature** (opt-in at compile time): replaces `rdebug!`
+//!   output with structured `tracing::debug!` events.  Enable with:
+//!   ```
+//!   cargo build --features debug-trace
+//!   RUST_LOG=rsync_rs=debug ./rsync-rs ...
+//!   ```
 
 #![allow(dead_code)]
 
@@ -26,12 +40,23 @@ pub fn is_debug() -> bool {
     DEBUG_ENABLED.load(Ordering::Relaxed)
 }
 
-/// Conditional eprintln gated on `RSYNC_RS_DEBUG`.
+/// Conditional debug trace macro.
+///
+/// When the `debug-trace` feature is enabled, emits a `tracing::debug!` event
+/// (controlled by `RUST_LOG`).  Otherwise falls back to an `eprintln!` guarded
+/// by the `RSYNC_RS_DEBUG` environment variable.
 #[macro_export]
 macro_rules! rdebug {
     ($($arg:tt)*) => {
-        if $crate::log_mod::is_debug() {
-            eprintln!($($arg)*);
+        #[cfg(feature = "debug-trace")]
+        {
+            tracing::debug!($($arg)*);
+        }
+        #[cfg(not(feature = "debug-trace"))]
+        {
+            if $crate::log_mod::is_debug() {
+                eprintln!($($arg)*);
+            }
         }
     };
 }

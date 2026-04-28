@@ -1,4 +1,5 @@
 pub mod checksum;
+pub mod batch;
 pub mod daemon;
 pub mod delta;
 pub mod fileops;
@@ -1062,6 +1063,13 @@ fn run_client(opts: &Options) -> Result<Stats> {
 
     let (sources, dest) = opts.parse_paths().context("parsing source/destination")?;
 
+    // --read-batch: apply a previously-written batch file to the destination.
+    if let Some(batch_path) = opts.read_batch.as_ref().map(|s| s.clone()) {
+        batch::run_read_batch(opts, &batch_path, &dest)
+            .context("read-batch")?;
+        return Ok(Default::default());
+    }
+
     // Determine transfer direction.
     let remote_dst = Options::parse_remote_dst(&dest);
     let remote_src = sources.iter().find_map(|s| Options::parse_remote_src(s));
@@ -1082,6 +1090,21 @@ fn run_client(opts: &Options) -> Result<Stats> {
         }
         let report = pipeline::run_local(opts, &sources, &dest)
             .context("local transfer")?;
+
+        // --write-batch: capture the flist + contents to a batch file.
+        if let Some(batch_path) = opts.write_batch.as_ref().map(|s| s.clone()) {
+            let filter = crate::filter::FilterList::from_options(opts).unwrap_or_default();
+            let recursive = opts.recursive || opts.archive;
+            let mut flist = crate::protocol::types::FileList::new();
+            for src in &sources {
+                let p = std::path::Path::new(src);
+                walk_source_dir(p, "", recursive, &mut flist, &filter);
+            }
+            crate::flist::flist_sort(&mut flist);
+            batch::run_write_batch(opts, &flist, &sources, &batch_path)
+                .context("write-batch")?;
+        }
+
         if opts.stats || opts.verbose > 0 {
             print_stats(&report.stats, start.elapsed().as_secs_f64(), opts.stats, opts.dry_run, false);
         }
@@ -1590,6 +1613,21 @@ fn main() {
     }
 
     log_mod::log_init();
+
+    // When built with the `debug-trace` feature, initialise the tracing
+    // subscriber so that `rdebug!` events are emitted to stderr.
+    // Control output with `RUST_LOG=rsync_rs=debug` (or any env-filter expr).
+    #[cfg(feature = "debug-trace")]
+    {
+        use tracing_subscriber::EnvFilter;
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| EnvFilter::new("rsync_rs=debug")),
+            )
+            .with_writer(std::io::stderr)
+            .init();
+    }
 
     let opts = match Options::try_parse() {
         Ok(o) => o,
