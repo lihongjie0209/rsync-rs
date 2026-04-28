@@ -271,11 +271,19 @@ fn handle_connection(
                 }
                 let mut s = String::from_utf8_lossy(&cur).into_owned();
                 if seen_dot {
-                    // strip "<modname>/" or exact "<modname>" prefix
-                    if s == module.name {
+                    // C clients sometimes embed the module name itself in the
+                    // path arg (e.g. push to bare module: "upload/" or
+                    // "upload").  After we chdir into module.path, that
+                    // prefix would resolve to a non-existent subdir.  Strip
+                    // ONLY when the entire arg is the module name (with or
+                    // without a trailing slash) -- mirrors the empty-dir
+                    // case of C's util1.c::glob_expand_module.  Do NOT
+                    // strip from inside the path (e.g. "upload/foo.txt"):
+                    // C clients already strip the leading "MOD/" themselves
+                    // for sub-paths in pull and push, so a stripped-here
+                    // sub-path would become incorrect.
+                    if s == module.name || s == format!("{}/", module.name) {
                         s = ".".to_string();
-                    } else if let Some(rest) = s.strip_prefix(&format!("{}/", module.name)) {
-                        s = if rest.is_empty() { ".".to_string() } else { rest.to_string() };
                     }
                 }
                 if s == "." {
