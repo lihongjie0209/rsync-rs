@@ -179,17 +179,26 @@ fn send_file_entry<W: Write>(
         xflags |= XMIT_MOD_NSEC;
     }
 
-    // A zero flags value would be misread as the end-of-list marker.
-    if xflags == 0 {
-        xflags = XMIT_EXTENDED_FLAGS;
-    }
-
     // ── write flags ───────────────────────────────────────────────────────
     if varint_flags {
+        // Varint path: a 0 flags would be misread as the end-of-list marker,
+        // so disambiguate by setting XMIT_EXTENDED_FLAGS.
+        if xflags == 0 {
+            xflags = XMIT_EXTENDED_FLAGS;
+        }
         write_varint(w, xflags as i32)?;
     } else {
-        // flist.c:551-558 — byte/shortint encoding gated by high bits.
-        if (xflags & 0xFF00) != 0 {
+        // Byte/shortint path. Mirror flist.c:551-558 exactly:
+        //   * For non-dir files with xflags==0, set XMIT_TOP_DIR so the
+        //     reader doesn't see a 0 byte (which means end-of-list).
+        //   * If high byte is non-zero OR flags are still 0, use shortint
+        //     and OR-in XMIT_EXTENDED_FLAGS.
+        //   * Otherwise just write the low byte.
+        let is_dir = matches!(FileType::from_mode(fi.mode), FileType::Dir);
+        if xflags == 0 && !is_dir {
+            xflags |= crate::protocol::constants::XMIT_TOP_DIR;
+        }
+        if (xflags & 0xFF00) != 0 || xflags == 0 {
             xflags |= XMIT_EXTENDED_FLAGS;
             write_shortint(w, xflags as u16)?;
         } else {
