@@ -200,6 +200,7 @@ pub fn run_server_receiver<R: Read, W: Write>(
     use_zlib: bool,
     inplace: bool,
     itemize: bool,
+    use_checksum: bool,
 ) -> Result<Stats> {
     use crate::delta::match_blocks::{write_sum_bufs, write_sum_head};
     use crate::fileops::slurp_file;
@@ -235,28 +236,32 @@ pub fn run_server_receiver<R: Read, W: Write>(
         }
         let dest_path = dest_dir.join(fi.path());
 
-        // Quick check: skip if size + mtime match (unless --checksum, which is
-        // not plumbed through here yet — always transfer for now if file is
-        // missing/different).
-        let needs = match fs::metadata(&dest_path) {
-            Err(_) => true,
-            Ok(m) => {
-                let mtime_match;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::MetadataExt;
-                    mtime_match = m.mtime() == fi.modtime;
+        // Quick check: skip if size + mtime match AND not using --checksum.
+        // With --checksum, we always request the file so the sender can do a
+        // whole-file checksum comparison.
+        let needs = if use_checksum {
+            true
+        } else {
+            match fs::metadata(&dest_path) {
+                Err(_) => true,
+                Ok(m) => {
+                    let mtime_match;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        mtime_match = m.mtime() == fi.modtime;
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        mtime_match = m
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs() as i64 == fi.modtime)
+                            .unwrap_or(false);
+                    }
+                    m.len() != fi.size as u64 || !mtime_match
                 }
-                #[cfg(not(unix))]
-                {
-                    mtime_match = m
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs() as i64 == fi.modtime)
-                        .unwrap_or(false);
-                }
-                m.len() != fi.size as u64 || !mtime_match
             }
         };
         if !needs {

@@ -15,6 +15,7 @@ Legend: ✅ implemented · ⚠️ partial · ❌ not yet
 | | Daemon **server** (`--daemon`, `rsyncd.conf`) | ✅ | `@RSYNCD:` greeting, modules, list, pull, push (read-only off), fork-per-connection on Unix |
 | | Daemon **client** (`rsync://host/MOD/path`) | ✅ | Push and pull against C rsync 3.2.7 daemon verified |
 | Wire format | Protocol versions 27–31, varint flist, MD5 strong sum, checksum-list negotiation | ✅ | |
+| | `--checksum` whole-file comparison (all directions) | ✅ | C↔rs, rs↔C all verified |
 | | Inc-recurse (`CF_INC_RECURSE`) | ❌ | Falls back to non-incremental flist |
 | | Multiplexed I/O (`MSG_DATA/INFO/ERR`) | ✅ | |
 | Files | Regular files, dirs, symlinks | ✅ | |
@@ -59,7 +60,7 @@ CI matrix per push (`.github/workflows/ci.yml`):
 | `Build *` (6 targets) | Release artifacts for Linux gnu/musl, macOS, Windows |
 | `Windows smoke (native)` | rsync-rs ↔ rsync-rs on Windows via local + cwRsync rsh |
 | `Windows smoke (interop)` | rsync-rs ↔ cwRsync (Cygwin C build) on Windows |
-| `Linux interop` | 56 scenarios: local + rsh + daemon, rs↔rs and rs↔C 3.2.7 — **56/56 pass** |
+| `Linux interop` | 60 scenarios: local + rsh + daemon + checksum, rs↔rs and rs↔C 3.2.7 — **60/60 pass** |
 
 ### Known interop gaps
 

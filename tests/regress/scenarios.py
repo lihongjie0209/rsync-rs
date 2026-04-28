@@ -428,6 +428,18 @@ def all_scenarios() -> list[Scenario]:
     # includes per-file checksums; otherwise the wire format is mismatched.
     sc.append(_c_pulls("c_pulls__checksum__av", fx_text_files(), ["-av", "--checksum"],
                        setup_dst=_setup_checksum_trap, verify_dst=_verify_checksum))
+    # c_pushes__checksum__av: C rsync client with --checksum pushes to rsync-rs server.
+    sc.append(_c_pushes("c_pushes__checksum__av", fx_text_files(), ["-av", "--checksum"],
+                        setup_dst=_setup_checksum_trap, verify_dst=_verify_checksum))
+    # rs_pulls_c__checksum__av: rsync-rs client with --checksum pulls from C server.
+    sc.append(_rs_pulls_c("rs_pulls_c__checksum__av", fx_text_files(), ["-av", "--checksum"],
+                          setup_dst=_setup_checksum_trap, verify_dst=_verify_checksum))
+    # rs_pushes_c__checksum__av: rsync-rs client with --checksum pushes to C server.
+    sc.append(_rs_pushes_c("rs_pushes_c__checksum__av", fx_text_files(), ["-av", "--checksum"],
+                           setup_dst=_setup_checksum_trap, verify_dst=_verify_checksum))
+    # self__checksum__av: rsync-rs client with --checksum to rsync-rs server.
+    sc.append(_self("self__checksum__av", fx_text_files(), ["-av", "--checksum"],
+                    setup_dst=_setup_checksum_trap, verify_dst=_verify_checksum))
 
     # ── 9. --write-batch / --read-batch (rsync-rs native format) ─────────────
     # Each test: write-batch from src, apply read-batch to dst, compare trees.

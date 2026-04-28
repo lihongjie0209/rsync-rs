@@ -885,7 +885,7 @@ pub fn run_server_io<R: std::io::Read, W: std::io::Write>(
 
         let mut stats = pipeline::receiver::run_server_receiver(
             &mut reader, &mut writer, &flist, dest_dir, rsync_ct, protocol, checksum_seed,
-            use_zlib, opts.inplace, opts.itemize_changes,
+            use_zlib, opts.inplace, opts.itemize_changes, use_checksum,
         )
         .context("server-receiver run")?;
         stats.deleted_files = del_files;
@@ -1405,7 +1405,7 @@ fn run_client_protocol<R: std::io::Read, W: std::io::Write>(
 
         let mut stats = pipeline::receiver::run_server_receiver(
             &mut reader, &mut writer, &flist, dest_path, rsync_ct, protocol, checksum_seed,
-            use_zlib, opts.inplace, opts.itemize_changes,
+            use_zlib, opts.inplace, opts.itemize_changes, opts.checksum,
         ).context("client-receiver run")?;
         stats.deleted_files = del_files;
         stats.deleted_dirs = del_dirs;
