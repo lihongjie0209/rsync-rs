@@ -947,14 +947,7 @@ fn run_client(opts: &Options) -> Result<Stats> {
     };
 
     if remote_spec.is_daemon {
-        // TODO: implement daemon-client transport (rsync:// URL).  For now
-        // bail with a clear message instead of falling through to SSH which
-        // would emit a confusing "Host key verification failed".
-        anyhow::bail!(
-            "rsync-rs does not yet support 'rsync://' URLs in client mode \
-             (daemon-client transport). Use SSH (host:path) or run \
-             rsync-rs as the daemon side. See https://github.com/lihongjie0209/rsync-rs#known-gaps"
-        );
+        return run_client_daemon(opts, &remote_spec, &remote_path, is_push, start);
     }
 
     // Build the SSH transport.
@@ -982,6 +975,112 @@ fn run_client(opts: &Options) -> Result<Stats> {
     crate::rdebug!("[rsync-rs client] starting protocol handshake...");
     let protocol = protocol_handshake(&mut stdout_pipe, &mut stdin_pipe, false)?;
     crate::rdebug!("[rsync-rs client] protocol={}", protocol);
+
+    let stats = run_client_protocol(
+        opts, &sources, &dest, is_push,
+        stdout_pipe, stdin_pipe, protocol,
+    )?;
+    let _ = ssh_child.wait();
+    if opts.stats || opts.verbose > 0 {
+        print_stats(&stats, start.elapsed().as_secs_f64(), opts.stats, opts.dry_run, false);
+    }
+    Ok(stats)
+}
+
+/// Daemon-mode client: open TCP, walk the @RSYNCD greeting, then run the
+/// normal client protocol pipeline.  The textual handshake also yields the
+/// negotiated protocol version, so we skip the binary 4-byte exchange that
+/// SSH-mode does.
+fn run_client_daemon(
+    opts: &Options,
+    remote_spec: &crate::options::RemoteSpec,
+    remote_path: &str,
+    is_push: bool,
+    start: std::time::Instant,
+) -> Result<Stats> {
+    // Split "MOD/sub/path" into ("MOD", "sub/path").  The daemon switches
+    // its cwd to the module dir, so the sub-path is what we actually want
+    // to send/receive.
+    let (module, sub_path) = match remote_path.split_once('/') {
+        Some((m, p)) => (m.to_string(), p.to_string()),
+        None => (remote_path.to_string(), String::new()),
+    };
+    if module.is_empty() {
+        anyhow::bail!("rsync:// URL is missing a module name (got '/{remote_path}')");
+    }
+
+    let port = remote_spec.port.unwrap_or(873);
+
+    // Build the argv we'll send to the daemon.  Same shape as SSH server
+    // args but with the path slot pointing at the module sub-path (or "."
+    // if the URL was just /MOD/).
+    let mut server_argv = opts.server_args();
+    if !is_push {
+        server_argv.push("--sender".into());
+    }
+    // Append the path operands.  C clients send: ".", then the path(s).
+    server_argv.push(".".into());
+    if is_push {
+        // For a push, the daemon-side "destination" is the module-relative
+        // path (or just the module name if the URL ended at /MOD/).
+        let dest_arg = if sub_path.is_empty() { module.clone() } else { sub_path.clone() };
+        server_argv.push(dest_arg);
+    } else {
+        // For a pull, the daemon-side "source" is the sub-path under MOD,
+        // or "." for a whole-module pull.
+        let src_arg = if sub_path.is_empty() { ".".into() } else { sub_path.clone() };
+        server_argv.push(src_arg);
+    }
+
+    let dc = transport::DaemonClient::connect(&remote_spec.host, port, &module, &server_argv)
+        .context("rsync daemon connect")?;
+    let protocol = dc.protocol;
+    crate::rdebug!("[rsync-rs daemon-client] negotiated protocol={protocol}");
+
+    let stats = run_client_protocol(
+        opts,
+        &if is_push {
+            // Sources stay as the local args from the CLI.
+            // We pull them out of opts.parse_paths() result via a re-parse.
+            let (sources, _) = opts.parse_paths().unwrap_or_default();
+            sources
+        } else {
+            // For pull, sources is the rsync:// URL; the protocol pipeline
+            // needs to know "the receiver writes here" but doesn't reach
+            // for `sources` itself.  Pass an empty slice.
+            Vec::new()
+        },
+        &if is_push {
+            // For a push, dest is unused inside the protocol body; pass empty.
+            String::new()
+        } else {
+            // Receiver writes into the local destination from the CLI.
+            opts.parse_paths().map(|(_, d)| d).unwrap_or_default()
+        },
+        is_push,
+        dc.reader,
+        dc.writer,
+        protocol,
+    )?;
+    if opts.stats || opts.verbose > 0 {
+        print_stats(&stats, start.elapsed().as_secs_f64(), opts.stats, opts.dry_run, false);
+    }
+    Ok(stats)
+}
+
+/// Run the post-handshake client protocol body over an already-opened pair
+/// of byte streams.  Used by both the SSH transport (where `protocol` came
+/// from `protocol_handshake`) and the rsync:// daemon transport (where it
+/// came from the textual `@RSYNCD:` greeting).
+fn run_client_protocol<R: std::io::Read, W: std::io::Write>(
+    opts: &Options,
+    sources: &[String],
+    dest: &str,
+    is_push: bool,
+    mut stdout_pipe: R,
+    mut stdin_pipe: W,
+    protocol: u32,
+) -> Result<Stats> {
     let (_do_varint, checksum_seed, compression_choice) = if protocol >= 30 {
         crate::rdebug!("[rsync-rs client] starting setup_compat_client...");
         let r = setup_compat_client(&mut stdout_pipe, &mut stdin_pipe, protocol, opts.compress)?;
@@ -1003,11 +1102,7 @@ fn run_client(opts: &Options) -> Result<Stats> {
     let mut reader = crate::io::multiplex::MplexReader::new(stdout_pipe);
     let mut writer = crate::io::multiplex::MplexWriter::new(std::io::BufWriter::new(stdin_pipe));
     if protocol >= 30 {
-        // Server-side: server-sender's OUT is muxed (proto>=23); server-receiver's
-        // OUT is muxed (in do_server_recv). So our IN must demultiplex.
         reader.enable();
-        // Server-sender's IN is muxed (proto>=31 with need_messages_from_generator).
-        // Server-receiver's IN is muxed (proto>=30). So our OUT must mux too.
         writer.enable();
     }
 
@@ -1019,13 +1114,9 @@ fn run_client(opts: &Options) -> Result<Stats> {
     };
 
     let stats = if is_push {
-        // Client-sender (push). C's exclude.c::send_filter_list line 1650
-        // suppresses output when (am_sender && !receiver_wants_list); for
-        // plain -av there's no filter list on the wire.
-
         // Build flist from local sources by walking the tree.
         let mut flist = crate::protocol::types::FileList::new();
-        for src in &sources {
+        for src in sources {
             let p = std::path::Path::new(src);
             let recursive = opts.recursive;
             if p.is_dir() {
@@ -1070,9 +1161,6 @@ fn run_client(opts: &Options) -> Result<Stats> {
             sender.stats.clone()
         };
 
-        // C client-sender: handle_stats() does nothing for am_sender client.
-        // read_final_goodbye reads NDX_DONE; for am_sender + proto>=31 writes
-        // NDX_DONE, then reads another.
         if protocol >= 29 {
             let _ = if protocol >= 30 { read_int_or_ndx(&mut reader, protocol).ok() } else { None };
             if protocol >= 31 {
@@ -1091,7 +1179,6 @@ fn run_client(opts: &Options) -> Result<Stats> {
         crate::rdebug!("[rsync-rs client] sending filter list terminator...");
         write_int(&mut writer, 0)?;
         writer.flush().ok();
-        crate::rdebug!("[rsync-rs client] filter list sent, waiting for flist...");
 
         if opts.verbose >= 1 {
             println!("receiving incremental file list");
@@ -1100,23 +1187,20 @@ fn run_client(opts: &Options) -> Result<Stats> {
             .context("recv_file_list")?;
         crate::rdebug!("[rsync-rs client] received flist with {} entries", flist.files.len());
 
-        let dest_path = std::path::Path::new(&dest);
+        let dest_path = std::path::Path::new(dest);
         let _ = std::fs::create_dir_all(dest_path);
 
-        crate::rdebug!("[rsync-rs client] starting receiver pipeline...");
         let mut stats = pipeline::receiver::run_server_receiver(
             &mut reader, &mut writer, &flist, dest_path, rsync_ct, protocol, checksum_seed,
             use_zlib, opts.inplace, opts.itemize_changes,
         ).context("client-receiver run")?;
-        crate::rdebug!("[rsync-rs client] receiver pipeline done");
 
-        // Read stats sent by the server-sender (handle_stats writes 3 or 5 varlongs).
         if protocol >= 29 {
             let total_written = crate::io::varint::read_varlong(&mut reader, 3).unwrap_or(0);
             let total_read = crate::io::varint::read_varlong(&mut reader, 3).unwrap_or(0);
             let total_size = crate::io::varint::read_varlong(&mut reader, 3).unwrap_or(0);
-            let _ = crate::io::varint::read_varlong(&mut reader, 3).ok(); // flist_buildtime
-            let _ = crate::io::varint::read_varlong(&mut reader, 3).ok(); // flist_xfertime
+            let _ = crate::io::varint::read_varlong(&mut reader, 3).ok();
+            let _ = crate::io::varint::read_varlong(&mut reader, 3).ok();
             stats.total_written = total_written;
             stats.total_read = total_read;
             stats.total_size = total_size;
@@ -1126,10 +1210,6 @@ fn run_client(opts: &Options) -> Result<Stats> {
 
     drop(writer);
     drop(reader);
-    let _ = ssh_child.wait();
-    if opts.stats || opts.verbose > 0 {
-        print_stats(&stats, start.elapsed().as_secs_f64(), opts.stats, opts.dry_run, false);
-    }
     Ok(stats)
 }
 
