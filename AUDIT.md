@@ -6,7 +6,7 @@
 
 | Bucket | Count | Notes |
 |---|---|---|
-| Passing integration | 56 | `local__*`, `c_pulls__*`, `c_pushes__*`, `self__*`, `rs_pulls_c__*`, `rs_pushes_c__*`, all `cli__*` |
+| Passing integration | 61 | `local__*`, `c_pulls__*`, `c_pushes__*`, `self__*`, `rs_pulls_c__*`, `rs_pushes_c__*`, all `cli__*`, `*__delete__*` |
 | Skipped | 0 | — |
 | Failing | 0 | — |
 | Unit tests | 173 | All platforms |
@@ -47,7 +47,7 @@
 * **Compress-list vstring exchange** when `-z` is in args (proposes `none`)
 * `checksum_seed = time(NULL) ^ (pid << 6)` written as int32
 * Multiplex out enabled at protocol ≥ 23, multiplex in at ≥ 30
-* Filter-list terminator `write_int(0)`
+* `--delete` (`--delete-before` semantics): extraneous dest files deleted in all 3 paths (local, client-pull, client-push/server-receiver). Filter-list wire exchange correct for protocol ≥ 30.
 * File-list:
   * varint-encoded XMIT flags
   * uid/gid name-list **gated on `preserve.uid`/`preserve.gid`** (matches `flist.c:2724-2731`)
@@ -64,7 +64,6 @@
 * **Inc-recurse** (`CF_INC_RECURSE`, protocol 30+): we never advertise it; works for current tests because the C side falls back, but large trees take more memory than necessary.
 
 ### 4.2 Common feature gaps (P1)
-* **Zlib token compression** (`-z`): blocks `c_pulls__mixed__avz`. ~400 LoC port of `token.c::send_deflated_token` + `recv_deflated_token`. Needs `flate2` raw deflate stream interleaved with the literal/match token wire.
 * **`--inplace`, `--append`, `--partial`, `--temp-dir`, `--backup`**: receiver behavior modes.
 * **ACLs (`-A`) / xattrs (`-X`)**: separate optional protocol subsections.
 * **`--list-only`** dedicated output formatter.

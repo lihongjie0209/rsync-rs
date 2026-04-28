@@ -524,7 +524,38 @@ def check_daemon_rs_pull_from_c() -> Scenario:
     return _make_check("cli__daemon_rs_pull_from_c", fn)
 
 
-def _have_rsync_daemon(ctx: ScenarioContext) -> bool:
+def check_itemize_changes() -> Scenario:
+    """rsync-rs -i (itemize-changes) must output 11-char prefix for new/changed files."""
+    def fn(ctx: ScenarioContext) -> str | None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "src"; dst = Path(td) / "dst"
+            src.mkdir(); dst.mkdir()
+            (src / "a.txt").write_bytes(b"hello")
+            # First sync: file is new → should show >f+++++++++
+            proc = subprocess.run(
+                [ctx.rsync_rs, "-ai", f"{src}/", f"{dst}/"],
+                capture_output=True)
+            if proc.returncode != 0:
+                return f"-ai exited {proc.returncode}: {proc.stderr.decode(errors='replace')}"
+            out = (proc.stdout + proc.stderr).decode("utf-8", errors="replace")
+            if not re.search(r">f\+{9}\s+a\.txt", out):
+                return f"missing '>f+++++++++ a.txt' pattern in:\n{out}"
+            # Second sync: nothing changed → no itemize line expected
+            proc2 = subprocess.run(
+                [ctx.rsync_rs, "-ai", f"{src}/", f"{dst}/"],
+                capture_output=True)
+            if proc2.returncode != 0:
+                return f"-ai second exited {proc2.returncode}"
+            out2 = (proc2.stdout + proc2.stderr).decode("utf-8", errors="replace")
+            # Should not mention a.txt again
+            if re.search(r"a\.txt", out2):
+                return f"second -ai run unexpectedly mentioned a.txt:\n{out2}"
+        return None
+    return _make_check("cli__itemize_changes", fn)
+
+
+
     """Best-effort check that ctx.rsync_c can run as a daemon."""
     try:
         proc = subprocess.run([ctx.rsync_c, "--version"], capture_output=True, timeout=3)
@@ -547,6 +578,7 @@ def all_cli_checks():
         check_stats_output(),
         check_flist_messages(),
         check_error_format(),
+        check_itemize_changes(),
         check_daemon_module_list(),
         check_daemon_pull_file(),
         check_daemon_push_to_rs(),

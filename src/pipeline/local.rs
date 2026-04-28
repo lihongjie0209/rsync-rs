@@ -255,11 +255,36 @@ fn copy_entry(
     }
 
     // Quick-skip if dest is up-to-date (size + mtime match), like rsync default.
-    if !opts.checksum && dest_in_sync(dest, meta) {
+    let dest_meta = fs::symlink_metadata(dest).ok();
+    if !opts.checksum && dest_meta_in_sync(dest_meta.as_ref(), meta) {
         return Ok(());
     }
 
-    if opts.verbose > 0 {
+    // Compute itemize iflags for this entry.
+    let iflags = if opts.itemize_changes {
+        use crate::protocol::constants::*;
+        let src_mode = {
+            #[cfg(unix)] { use std::os::unix::fs::MetadataExt; meta.mode() }
+            #[cfg(not(unix))] { if ft.is_dir() { 0o040755 } else { 0o100644 } }
+        };
+        if dest_meta.is_none() {
+            Some((ITEM_IS_NEW | ITEM_TRANSFER, src_mode))
+        } else {
+            let dm = dest_meta.as_ref().unwrap();
+            let size_changed = dm.len() != meta.len();
+            let time_changed = dm.modified().ok() != meta.modified().ok();
+            let mut f = ITEM_TRANSFER;
+            if size_changed { f |= ITEM_REPORT_SIZE; }
+            if time_changed { f |= ITEM_REPORT_TIME; }
+            Some((f, src_mode))
+        }
+    } else {
+        None
+    };
+
+    if let Some((flags, mode)) = iflags {
+        println!("{} {}", crate::util::iflags_to_str(flags, mode, false), rel_display(rel));
+    } else if opts.verbose > 0 {
         // C rsync prints the relative path via FINFO (stdout), forward
         // slashes, no leading "./".
         println!("{}", rel_display(rel));
@@ -299,8 +324,8 @@ fn copy_entry(
 
 /// Returns true when an existing dest looks identical enough that rsync's
 /// quick-check would skip it (size + mtime to the second).
-fn dest_in_sync(dest: &Path, src_meta: &fs::Metadata) -> bool {
-    let Ok(d) = fs::symlink_metadata(dest) else { return false };
+fn dest_meta_in_sync(dest_meta: Option<&fs::Metadata>, src_meta: &fs::Metadata) -> bool {
+    let Some(d) = dest_meta else { return false };
     if d.is_dir() != src_meta.is_dir() {
         return false;
     }

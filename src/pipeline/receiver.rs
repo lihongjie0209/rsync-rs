@@ -349,7 +349,9 @@ pub fn run_server_receiver<R: Read, W: Write>(
         if let Some(parent) = dest_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let dest_existed = dest_path.exists();
+        // Capture pre-transfer metadata for itemize comparison.
+        let pre_meta = fs::metadata(&dest_path).ok();
+        let dest_existed = pre_meta.is_some();
         if inplace {
             // Write directly to destination — no temp file, no rename.
             let mut f = fs::File::create(&dest_path)?;
@@ -374,14 +376,24 @@ pub fn run_server_receiver<R: Read, W: Write>(
         if itemize {
             use crate::protocol::constants::*;
             let mode = fi.mode as u32;
-            let iflags = if dest_existed {
-                ITEM_TRANSFER | ITEM_REPORT_SIZE | ITEM_REPORT_TIME
-            } else {
+            let iflags = if !dest_existed {
                 ITEM_IS_NEW | ITEM_TRANSFER
+            } else {
+                let size_changed = pre_meta.as_ref().map(|m| m.len() != fi.size as u64).unwrap_or(true);
+                let time_changed = pre_meta.as_ref().map(|m| {
+                    #[cfg(unix)]
+                    { use std::os::unix::fs::MetadataExt; m.mtime() != fi.modtime }
+                    #[cfg(not(unix))]
+                    { m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as i64 != fi.modtime).unwrap_or(true) }
+                }).unwrap_or(true);
+                let mut f = ITEM_TRANSFER;
+                if size_changed { f |= ITEM_REPORT_SIZE; }
+                if time_changed { f |= ITEM_REPORT_TIME; }
+                f
             };
             let prefix = crate::util::iflags_to_str(iflags, mode, false);
-            let path_str = fi.path();
-            eprintln!("{} {}", prefix, path_str);
+            println!("{} {}", prefix, fi.path());
         }
 
         stats.num_files += 1;
