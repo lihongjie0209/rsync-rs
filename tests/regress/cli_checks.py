@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import os
 from pathlib import Path
 
 from .harness import (
@@ -427,14 +428,27 @@ def check_daemon_rs_push_to_c() -> Scenario:
                 if not _wait_listen(port):
                     log_txt = log.read_text(errors='replace') if log.exists() else "(no log)"
                     return f"C daemon did not start. log:\n{log_txt}"
-                proc = subprocess.run(
+                client = subprocess.Popen(
                     [ctx.rsync_rs, "-a", f"{src}/",
                      f"rsync://127.0.0.1:{port}/upload/"],
-                    capture_output=True, timeout=10)
-                if proc.returncode != 0:
-                    return (f"rs->C daemon push exit {proc.returncode}\n"
-                            f"stdout={proc.stdout.decode(errors='replace')}\n"
-                            f"stderr={proc.stderr.decode(errors='replace')}")
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    env={**os.environ, "RSYNC_RS_DEBUG": "1"})
+                try:
+                    out, err = client.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    client.kill()
+                    out, err = client.communicate()
+                    log_txt = log.read_text(errors='replace') if log.exists() else "(no log)"
+                    return (f"rs->C daemon push hung\n"
+                            f"stdout={out.decode(errors='replace')}\n"
+                            f"stderr={err.decode(errors='replace')}\n"
+                            f"daemon_log:\n{log_txt}")
+                if client.returncode != 0:
+                    log_txt = log.read_text(errors='replace') if log.exists() else "(no log)"
+                    return (f"rs->C daemon push exit {client.returncode}\n"
+                            f"stdout={out.decode(errors='replace')}\n"
+                            f"stderr={err.decode(errors='replace')}\n"
+                            f"daemon_log:\n{log_txt}")
                 for name, want in [("hello.txt", b"hello c daemon"),
                                    ("data.bin", bytes(range(128)) * 8)]:
                     got = (mod_dir / name).read_bytes()
@@ -478,14 +492,27 @@ def check_daemon_rs_pull_from_c() -> Scenario:
                 if not _wait_listen(port):
                     log_txt = log.read_text(errors='replace') if log.exists() else "(no log)"
                     return f"C daemon did not start. log:\n{log_txt}"
-                proc = subprocess.run(
+                client = subprocess.Popen(
                     [ctx.rsync_rs, "-a", f"rsync://127.0.0.1:{port}/share/",
                      f"{dst}/"],
-                    capture_output=True, timeout=10)
-                if proc.returncode != 0:
-                    return (f"rs<-C daemon pull exit {proc.returncode}\n"
-                            f"stdout={proc.stdout.decode(errors='replace')}\n"
-                            f"stderr={proc.stderr.decode(errors='replace')}")
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    env={**os.environ, "RSYNC_RS_DEBUG": "1"})
+                try:
+                    out, err = client.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    client.kill()
+                    out, err = client.communicate()
+                    log_txt = log.read_text(errors='replace') if log.exists() else "(no log)"
+                    return (f"rs<-C daemon pull hung\n"
+                            f"stdout={out.decode(errors='replace')}\n"
+                            f"stderr={err.decode(errors='replace')}\n"
+                            f"daemon_log:\n{log_txt}")
+                if client.returncode != 0:
+                    log_txt = log.read_text(errors='replace') if log.exists() else "(no log)"
+                    return (f"rs<-C daemon pull exit {client.returncode}\n"
+                            f"stdout={out.decode(errors='replace')}\n"
+                            f"stderr={err.decode(errors='replace')}\n"
+                            f"daemon_log:\n{log_txt}")
                 for name, want in [("hello.txt", b"hi from c daemon"),
                                    ("blob.bin", bytes(range(200)) * 5)]:
                     got = (dst / name).read_bytes()

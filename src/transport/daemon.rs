@@ -73,6 +73,7 @@ impl DaemonClient {
         let mut reader = BufReader::new(reader_raw);
 
         // 1. Send our greeting.
+        crate::rdebug!("[daemon] connected to {addr}, sending greeting @RSYNCD: {}.0", PROTOCOL_VERSION);
         write!(writer, "@RSYNCD: {}.0\n", PROTOCOL_VERSION)?;
         writer.flush()?;
 
@@ -81,6 +82,7 @@ impl DaemonClient {
         reader
             .read_line(&mut line)
             .context("read daemon greeting")?;
+        crate::rdebug!("[daemon] peer greeting: {:?}", line.trim_end_matches(['\n', '\r']));
         let peer_proto = {
             let trimmed = line.trim_end_matches(['\n', '\r']);
             parse_greeting(trimmed)
@@ -96,6 +98,7 @@ impl DaemonClient {
         }
 
         // 3. Send module-name line.
+        crate::rdebug!("[daemon] sending module name: {module}");
         write!(writer, "{module}\n")?;
         writer.flush()?;
 
@@ -109,6 +112,7 @@ impl DaemonClient {
                 bail!("rsync daemon closed connection before module approval");
             }
             let trimmed = line.trim_end_matches(['\n', '\r']);
+            crate::rdebug!("[daemon] response: {trimmed:?}");
             if let Some(rest) = trimmed.strip_prefix("@RSYNCD: ") {
                 if rest == "OK" {
                     break;
@@ -154,13 +158,16 @@ impl DaemonClient {
         let reader_raw = reader.into_inner();
 
         // 5. Send NUL-terminated argv.  Always lead with "--server".
+        crate::rdebug!("[daemon] sending argv: --server");
         write_nul_arg(&mut writer, "--server")?;
         for a in server_argv {
+            crate::rdebug!("[daemon] sending argv: {a:?}");
             write_nul_arg(&mut writer, a)?;
         }
         // Trailing empty arg signals end-of-list.
         writer.write_all(&[0u8])?;
         writer.flush()?;
+        crate::rdebug!("[daemon] argv send complete; handing off to compat negotiation");
 
         // Once handshake is done, restore unbounded blocking I/O on both
         // sides — the pipeline uses long-running reads/writes.
