@@ -1019,18 +1019,21 @@ fn run_client_daemon(
         server_argv.push("--sender".into());
     }
     // Append the path operands.  C clients send: ".", then the path(s).
+    // Match the C client byte-for-byte: the user-provided path arg from the
+    // rsync:// URL is preserved verbatim, including a trailing slash if the
+    // URL had one.  The daemon-side server uses this to distinguish
+    // "module root" (with slash) from "module name as a file" (no slash).
     server_argv.push(".".into());
-    if is_push {
-        // For a push, the daemon-side "destination" is the module-relative
-        // path (or just the module name if the URL ended at /MOD/).
-        let dest_arg = if sub_path.is_empty() { module.clone() } else { sub_path.clone() };
-        server_argv.push(dest_arg);
+    let path_arg = if sub_path.is_empty() {
+        // URL was rsync://host/MOD/  -- send "MOD/"
+        format!("{module}/")
+    } else if remote_path.ends_with('/') {
+        // URL ended with a slash on a sub-path; preserve it.
+        format!("{module}/{sub_path}")
     } else {
-        // For a pull, the daemon-side "source" is the sub-path under MOD,
-        // or "." for a whole-module pull.
-        let src_arg = if sub_path.is_empty() { ".".into() } else { sub_path.clone() };
-        server_argv.push(src_arg);
-    }
+        format!("{module}/{}", sub_path.trim_end_matches('/'))
+    };
+    server_argv.push(path_arg);
 
     let dc = transport::DaemonClient::connect(&remote_spec.host, port, &module, &server_argv)
         .context("rsync daemon connect")?;
