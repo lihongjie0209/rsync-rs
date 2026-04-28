@@ -1,15 +1,15 @@
 # rsync-rs ↔ C rsync 3.4.2 Audit
 
-> Generated as a single-shot snapshot. Source totals: **C = 984 KB across ~60 .c files**, **Rust = 346 KB across ~30 .rs files**. The size delta reflects features still missing (daemon, ACL, xattr, batch, hardlinks, full token compression).
+> Living document. Source totals: **C = 984 KB across ~60 .c files**, **Rust = 346 KB across ~30 .rs files**.
 
-## 1. Test status (regression harness, Docker-host)
+## 1. Test status (regression harness, CI)
 
 | Bucket | Count | Notes |
 |---|---|---|
-| Passing integration | 40 | `local__*`, `c_pulls__*` (av/vrt), `c_pushes__*`, `self__*`, `rs_pulls_c__*`, all `cli__*` |
-| Skipped | 1 | `c_pulls__mixed__avz` — zlib token framing not implemented |
+| Passing integration | 56 | `local__*`, `c_pulls__*`, `c_pushes__*`, `self__*`, `rs_pulls_c__*`, `rs_pushes_c__*`, all `cli__*` |
+| Skipped | 0 | — |
 | Failing | 0 | — |
-| Unit tests | 156 | Including 11 new for `options_server` parser |
+| Unit tests | 173 | All platforms |
 
 ## 2. Module-by-module coverage
 
@@ -20,14 +20,14 @@
 | `io.c` | `io/{multiplex,varint}.rs` | ✅ | No `read_buf_via` keepalive; no remote-error replay buffer |
 | `checksum.c` | `checksum/{rolling,strong}.rs` | ✅ | No xxh64/xxh3/xxh128 (md5/md4 only) |
 | `match.c` | `delta/match_blocks.rs` | ✅ | No 2nd-pass fuzzy matching |
-| `token.c` | `delta/token.rs` | ⚠️ partial | Only `simple_send_token`/`simple_recv_token`. **No `send_deflated_token`/`recv_deflated_token`** → `-z` blocks (see §4.5) |
+| `token.c` | `delta/token.rs` | ✅ | Both simple and deflated (zlib) token streams implemented; `-z` works end-to-end |
 | `sender.c` | `pipeline/sender.rs` | ✅ | No `--inplace`, no `--append`, no batch-write |
 | `receiver.c` | `pipeline/receiver.rs` | ✅ | No `--partial-dir`, no `--temp-dir` |
 | `generator.c` | `pipeline/generator.rs` | ✅ basic | No deferred-flist generator phase, no hard-link generation |
 | `main.c` | `main.rs` | ✅ | Daemon entry path missing |
 | `options.c` | `options.rs` + `options_server.rs` | ✅ | Long-option set is reduced; popt-style abbreviations not supported |
 | `compat.c` | inlined in `main.rs::setup_compat*` | ✅ | Compress negotiation accepts only `none`; no real algorithm |
-| `clientserver.c`, `socket.c`, `authenticate.c`, `loadparm.c`, `access.c` | `daemon.rs` (server side only) | ⚠️ partial | **Daemon-CLIENT mode (`rsync://` URL on client) NOT implemented**: rsync-rs cannot connect TO a remote rsync daemon. Daemon-server side works for list+pull; push receiver path now strips module prefix from args. No AUTHREQD. |
+| `clientserver.c`, `socket.c`, `authenticate.c`, `loadparm.c`, `access.c` | `daemon.rs` (server + client) | ✅ | Daemon-server: list+pull+push. Daemon-client (`rsync://` URL): push and pull verified against C rsync 3.2.7. No AUTHREQD. |
 | `acls.c`, `xattrs.c` | — | ❌ | No ACL/xattr |
 | `backup.c`, `batch.c` | — | ❌ | No `--backup`, no `--write-batch`/`--read-batch` |
 | `hlink.c` | — | ❌ stub | No hardlink detection |
@@ -59,9 +59,7 @@
 ## 4. Known gaps and risk ranking
 
 ### 4.1 Critical for parity (P0)
-* **Daemon-CLIENT transport** (`rsync://` URL as client): `clientserver.c::start_inband_exchange` port. Currently rsync-rs bails with a clear error when given a `rsync://` URL in client mode. Needed before rsync-rs can act as a client to remote daemons (e.g. `rsync-rs -av rsync://srv/mod/ /local/`).
-* **rsync-rs ↔ C 3.2.7 over rsh, push direction**: the new `linux-interop` CI (commit aaba122) revealed that `rsync-rs --server` accepted by C 3.2.7 client returns `flist.c(786) protocol incompatibility`. Pull direction (rsync-rs server-as-sender) works; push direction (rsync-rs server-as-receiver from C 3.2.7 sender) needs flist re-audit. Likely a missing XMIT flag handling for new protocol features 3.2.7 emits.
-* **Daemon mode** (`--daemon` server, large): partial — list/pull work end-to-end; push works after the module-prefix strip fix in `daemon.rs` (now matches `util1.c::glob_expand_module`). No AUTHREQD support.
+* **No AUTHREQD support** in the daemon server — modules with `auth users`/`secrets file` are not honored.
 * **Hard links** (`-H`): correctness issue when source has hardlinks; we currently send each link as an independent file.
 * **Inc-recurse** (`CF_INC_RECURSE`, protocol 30+): we never advertise it; works for current tests because the C side falls back, but large trees take more memory than necessary.
 
