@@ -28,6 +28,17 @@ use anyhow::{Context, Result};
 use crate::options::Options;
 use crate::protocol::types::Stats;
 
+/// Format a relative path the way C rsync's `f_name()` does: forward
+/// slashes only, no leading `./`.  Used for all verbose-mode output.
+fn rel_display(rel: &Path) -> String {
+    let s = rel.to_string_lossy();
+    if std::path::MAIN_SEPARATOR == '\\' {
+        s.replace('\\', "/")
+    } else {
+        s.into_owned()
+    }
+}
+
 /// Result of running a local transfer.
 #[derive(Debug, Default, Clone)]
 pub struct LocalReport {
@@ -101,11 +112,12 @@ fn copy_one(
         if !(opts.recursive || opts.archive) {
             // Match C rsync's "skipping directory NAME" line.
             if opts.verbose > 0 {
+                // C rsync: "skipping directory NAME" → FINFO → stdout.
                 let name = src_path
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| src.to_string());
-                eprintln!("skipping directory {name}");
+                println!("skipping directory {name}");
             }
             return Ok(());
         }
@@ -132,15 +144,17 @@ fn copy_one(
         }
     } else {
         // Regular file (or symlink/special).  Compute final destination.
+        let src_basename = src_path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("source has no basename: {src_path:?}"))?
+            .to_owned();
         let final_dest = if dest_is_dir {
-            let basename = src_path
-                .file_name()
-                .ok_or_else(|| anyhow::anyhow!("source has no basename: {src_path:?}"))?;
-            dest_root.join(basename)
+            dest_root.join(&src_basename)
         } else {
             dest_root.to_path_buf()
         };
-        copy_entry(opts, &src_path, &final_dest, &meta, report, links)?;
+        let rel = PathBuf::from(&src_basename);
+        copy_entry(opts, &src_path, &final_dest, &meta, &rel, report, links)?;
         if let Ok(rel) = final_dest.strip_prefix(dest_root) {
             kept.insert(rel.to_path_buf());
         }
@@ -184,7 +198,7 @@ fn copy_dir_recursive(
             copy_dir_recursive(opts, &src_child, &dest_child, rel.clone(), report, kept, links)?;
             apply_dir_meta(opts, &dest_child, &meta)?;
         } else {
-            copy_entry(opts, &src_child, &dest_child, &meta, report, links)?;
+            copy_entry(opts, &src_child, &dest_child, &meta, &rel, report, links)?;
         }
     }
 
@@ -198,6 +212,7 @@ fn copy_entry(
     src: &Path,
     dest: &Path,
     meta: &fs::Metadata,
+    rel: &Path,
     report: &mut LocalReport,
     links: &mut LinkMap,
 ) -> Result<()> {
@@ -224,7 +239,11 @@ fn copy_entry(
                         .with_context(|| format!("hard_link {first:?} -> {dest:?}"))?;
                 }
                 if opts.verbose > 0 {
-                    eprintln!("{} => {}", dest.display(), first.display());
+                    // Match C rsync's "NAME => TARGET" form (FINFO → stdout).
+                    let target_rel = first
+                        .strip_prefix(dest.parent().unwrap_or_else(|| Path::new("")))
+                        .unwrap_or(&first);
+                    println!("{} => {}", rel_display(rel), rel_display(target_rel));
                 }
                 report.hardlinked.push(dest.to_path_buf());
                 report.stats.xferred_files += 1;
@@ -241,9 +260,9 @@ fn copy_entry(
     }
 
     if opts.verbose > 0 {
-        // Match rsync's verbose form: bare relative name, no leading dot.
-        let display = src.display();
-        eprintln!("{display}");
+        // C rsync prints the relative path via FINFO (stdout), forward
+        // slashes, no leading "./".
+        println!("{}", rel_display(rel));
     }
 
     if opts.dry_run {
@@ -488,7 +507,7 @@ fn delete_extraneous(
                 continue;
             }
             if opts.verbose > 0 {
-                eprintln!("deleting {}", rel.display());
+                println!("deleting {}", rel_display(&rel));
             }
             if !opts.dry_run {
                 if entry.file_type()?.is_dir() {

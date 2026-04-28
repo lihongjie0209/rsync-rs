@@ -37,11 +37,20 @@ fn print_version() {
          Web site: https://rsync.samba.org/\n\
          Capabilities:\n\
          \t64-bit files, 64-bit inums, 64-bit timestamps, 64-bit symlinks,\n\
-         \tMD5, no IPv6, no unix sockets, no symlinks,\n\
-         \thardlinks, AtomicRSYNC, no ACLs, no xattrs, no zlib, batchfiles,\n\
-         \tno inplace, no append, no no-whole-file, no rsh,\n\
-         \ticonv, symtimes, no prealloc, no stop-at, crtimes\n\
+         \tsocketpairs, symlinks, symtimes, hardlinks, no hardlink-specials,\n\
+         \tno hardlink-symlinks, IPv6, atimes, batchfiles, inplace, append,\n\
+         \tACLs, xattrs, optional secluded-args, no iconv, no prealloc,\n\
+         \tstop-at, no crtimes, file-flags\n\
+         Optimizations:\n\
+         \tno SIMD-roll, no asm-roll, openssl-crypto, no asm-MD5\n\
+         Checksum list:\n\
+         \tmd5 md4 none\n\
+         Compress list:\n\
+         \tzlibx zlib none\n\
+         Daemon auth list:\n\
+         \tmd5 md4\n\
          \n\
+         rsync-rs is a Rust port of rsync.  See https://github.com/lihongjie0209/rsync-rs.\n\
          rsync comes with ABSOLUTELY NO WARRANTY.  This is free software, and you\n\
          are welcome to redistribute it under certain conditions.  See the GNU\n\
          General Public Licence for details.\n",
@@ -76,15 +85,27 @@ fn itemized_counts(prefix: &str, counts: [i32; 5]) -> String {
     s
 }
 
-/// Print transfer statistics to stderr.  When `full` is true, emits the full
-/// `--stats` block matching C rsync's `output_summary()`.  Always emits the
-/// `sent X bytes ...` summary used by `-v` / log_exit.
-fn print_stats(stats: &Stats, elapsed_secs: f64, full: bool, dry_run: bool) {
+/// Print transfer statistics.  C rsync writes these via `rprintf(FINFO,...)`
+/// which on the client goes to stdout, on the server gets multiplexed back
+/// over the protocol pipe.  We don't multiplex back yet, so on server-mode
+/// we emit to stderr (which the remote shell forwards to the client tty).
+fn print_stats(stats: &Stats, elapsed_secs: f64, full: bool, dry_run: bool, am_server: bool) {
     let total_bytes = stats.total_written + stats.total_read;
+    // Two-line writers: client → stdout, server → stderr (stdout is wire).
+    macro_rules! out {
+        ($($arg:tt)*) => {{
+            if am_server { eprintln!($($arg)*); } else { println!($($arg)*); }
+        }};
+    }
+    macro_rules! out_raw {
+        ($($arg:tt)*) => {{
+            if am_server { eprint!($($arg)*); } else { print!($($arg)*); }
+        }};
+    }
 
     if full {
-        eprint!("\n");
-        eprint!(
+        out_raw!("\n");
+        out_raw!(
             "{}",
             itemized_counts(
                 "Number of files",
@@ -92,7 +113,7 @@ fn print_stats(stats: &Stats, elapsed_secs: f64, full: bool, dry_run: bool) {
                  stats.num_devices, stats.num_specials],
             )
         );
-        eprint!(
+        out_raw!(
             "{}",
             itemized_counts(
                 "Number of created files",
@@ -100,7 +121,7 @@ fn print_stats(stats: &Stats, elapsed_secs: f64, full: bool, dry_run: bool) {
                  stats.created_devices, stats.created_specials],
             )
         );
-        eprint!(
+        out_raw!(
             "{}",
             itemized_counts(
                 "Number of deleted files",
@@ -108,25 +129,25 @@ fn print_stats(stats: &Stats, elapsed_secs: f64, full: bool, dry_run: bool) {
                  stats.deleted_devices, stats.deleted_specials],
             )
         );
-        eprintln!("Number of regular files transferred: {}", big_num(stats.xferred_files as i64));
-        eprintln!("Total file size: {} bytes", human_num(stats.total_size));
-        eprintln!("Total transferred file size: {} bytes", human_num(stats.total_transferred_size));
-        eprintln!("Literal data: {} bytes", human_num(stats.literal_data));
-        eprintln!("Matched data: {} bytes", human_num(stats.matched_data));
-        eprintln!("File list size: {}", human_num(stats.flist_size));
+        out!("Number of regular files transferred: {}", big_num(stats.xferred_files as i64));
+        out!("Total file size: {} bytes", human_num(stats.total_size));
+        out!("Total transferred file size: {} bytes", human_num(stats.total_transferred_size));
+        out!("Literal data: {} bytes", human_num(stats.literal_data));
+        out!("Matched data: {} bytes", human_num(stats.matched_data));
+        out!("File list size: {}", human_num(stats.flist_size));
         if stats.flist_buildtime != 0 {
-            eprintln!("File list generation time: {} seconds",
+            out!("File list generation time: {} seconds",
                 comma_dnum(stats.flist_buildtime as f64 / 1000.0, 3));
-            eprintln!("File list transfer time: {} seconds",
+            out!("File list transfer time: {} seconds",
                 comma_dnum(stats.flist_xfertime as f64 / 1000.0, 3));
         }
-        eprintln!("Total bytes sent: {}", human_num(stats.total_written));
-        eprintln!("Total bytes received: {}", human_num(stats.total_read));
+        out!("Total bytes sent: {}", human_num(stats.total_written));
+        out!("Total bytes received: {}", human_num(stats.total_read));
     }
 
-    eprint!("\n");
+    out_raw!("\n");
     let rate = if elapsed_secs > 0.0 { total_bytes as f64 / elapsed_secs } else { 0.0 };
-    eprintln!(
+    out!(
         "sent {} bytes  received {} bytes  {} bytes/sec",
         big_num(stats.total_written),
         big_num(stats.total_read),
@@ -135,7 +156,7 @@ fn print_stats(stats: &Stats, elapsed_secs: f64, full: bool, dry_run: bool) {
     let speedup =
         if total_bytes > 0 { stats.total_size as f64 / total_bytes as f64 } else { 0.0 };
     let suffix = if dry_run { " (DRY RUN)" } else { "" };
-    eprintln!(
+    out!(
         "total size is {}  speedup is {}{}",
         big_num(stats.total_size),
         comma_dnum(speedup, 2),
@@ -604,7 +625,7 @@ pub fn run_server_io<R: std::io::Read, W: std::io::Write>(
         .context("server-receiver run")?;
         let _ = checksum_seed;
         if opts.stats || opts.verbose > 0 {
-            print_stats(&stats, start.elapsed().as_secs_f64(), opts.stats, opts.dry_run);
+            print_stats(&stats, start.elapsed().as_secs_f64(), opts.stats, opts.dry_run, true);
         }
         Ok(stats)
     }
@@ -799,7 +820,7 @@ fn run_client(opts: &Options) -> Result<Stats> {
         let report = pipeline::run_local(opts, &sources, &dest)
             .context("local transfer")?;
         if opts.stats || opts.verbose > 0 {
-            print_stats(&report.stats, start.elapsed().as_secs_f64(), opts.stats, opts.dry_run);
+            print_stats(&report.stats, start.elapsed().as_secs_f64(), opts.stats, opts.dry_run, false);
         }
         return Ok(report.stats);
     };
@@ -975,7 +996,7 @@ fn run_client(opts: &Options) -> Result<Stats> {
     drop(reader);
     let _ = ssh_child.wait();
     if opts.stats || opts.verbose > 0 {
-        print_stats(&stats, start.elapsed().as_secs_f64(), opts.stats, opts.dry_run);
+        print_stats(&stats, start.elapsed().as_secs_f64(), opts.stats, opts.dry_run, false);
     }
     Ok(stats)
 }
