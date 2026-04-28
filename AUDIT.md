@@ -27,7 +27,7 @@
 | `main.c` | `main.rs` | ✅ | Daemon entry path missing |
 | `options.c` | `options.rs` + `options_server.rs` | ✅ | Long-option set is reduced; popt-style abbreviations not supported |
 | `compat.c` | inlined in `main.rs::setup_compat*` | ✅ | Compress negotiation accepts only `none`; no real algorithm |
-| `clientserver.c`, `socket.c`, `authenticate.c`, `loadparm.c`, `access.c` | — | ❌ | Daemon mode entirely absent |
+| `clientserver.c`, `socket.c`, `authenticate.c`, `loadparm.c`, `access.c` | `daemon.rs` (server side only) | ⚠️ partial | **Daemon-CLIENT mode (`rsync://` URL on client) NOT implemented**: rsync-rs cannot connect TO a remote rsync daemon. Daemon-server side works for list+pull; push receiver path now strips module prefix from args. No AUTHREQD. |
 | `acls.c`, `xattrs.c` | — | ❌ | No ACL/xattr |
 | `backup.c`, `batch.c` | — | ❌ | No `--backup`, no `--write-batch`/`--read-batch` |
 | `hlink.c` | — | ❌ stub | No hardlink detection |
@@ -59,7 +59,9 @@
 ## 4. Known gaps and risk ranking
 
 ### 4.1 Critical for parity (P0)
-* **Daemon mode** (`--daemon`, `rsync://`): `clientserver.c` + `authenticate.c` + `loadparm.c`. ~1500 LoC of C.
+* **Daemon-CLIENT transport** (`rsync://` URL as client): `clientserver.c::start_inband_exchange` port. Currently rsync-rs bails with a clear error when given a `rsync://` URL in client mode. Needed before rsync-rs can act as a client to remote daemons (e.g. `rsync-rs -av rsync://srv/mod/ /local/`).
+* **rsync-rs ↔ C 3.2.7 over rsh, push direction**: the new `linux-interop` CI (commit aaba122) revealed that `rsync-rs --server` accepted by C 3.2.7 client returns `flist.c(786) protocol incompatibility`. Pull direction (rsync-rs server-as-sender) works; push direction (rsync-rs server-as-receiver from C 3.2.7 sender) needs flist re-audit. Likely a missing XMIT flag handling for new protocol features 3.2.7 emits.
+* **Daemon mode** (`--daemon` server, large): partial — list/pull work end-to-end; push works after the module-prefix strip fix in `daemon.rs` (now matches `util1.c::glob_expand_module`). No AUTHREQD support.
 * **Hard links** (`-H`): correctness issue when source has hardlinks; we currently send each link as an independent file.
 * **Inc-recurse** (`CF_INC_RECURSE`, protocol 30+): we never advertise it; works for current tests because the C side falls back, but large trees take more memory than necessary.
 

@@ -250,11 +250,16 @@ fn handle_connection(
 
     // 5. Read the per-connection argv.  Protocol ≥ 30 uses NUL-terminated
     //    args (ending with an empty string == double-NUL).
+    //    C `glob_expand_module()` (util1.c:786) strips the "<module>" or
+    //    "<module>/" prefix from path args after the dot-separator, so do the
+    //    same here -- otherwise paths like "upload/" resolve under the
+    //    already-chdir'd module dir and the receiver writes nowhere.
     let mut args: Vec<String> = vec!["rsyncd".to_string()];
     {
         use std::io::Read;
         let mut byte = [0u8; 1];
         let mut cur: Vec<u8> = Vec::new();
+        let mut seen_dot = false;
         loop {
             let n = raw_reader.read(&mut byte)?;
             if n == 0 {
@@ -264,7 +269,19 @@ fn handle_connection(
                 if cur.is_empty() {
                     break;
                 }
-                args.push(String::from_utf8_lossy(&cur).into_owned());
+                let mut s = String::from_utf8_lossy(&cur).into_owned();
+                if seen_dot {
+                    // strip "<modname>/" or exact "<modname>" prefix
+                    if s == module.name {
+                        s = ".".to_string();
+                    } else if let Some(rest) = s.strip_prefix(&format!("{}/", module.name)) {
+                        s = if rest.is_empty() { ".".to_string() } else { rest.to_string() };
+                    }
+                }
+                if s == "." {
+                    seen_dot = true;
+                }
+                args.push(s);
                 cur.clear();
             } else {
                 cur.push(byte[0]);

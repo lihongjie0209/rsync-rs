@@ -946,6 +946,17 @@ fn run_client(opts: &Options) -> Result<Stats> {
         return Ok(report.stats);
     };
 
+    if remote_spec.is_daemon {
+        // TODO: implement daemon-client transport (rsync:// URL).  For now
+        // bail with a clear message instead of falling through to SSH which
+        // would emit a confusing "Host key verification failed".
+        anyhow::bail!(
+            "rsync-rs does not yet support 'rsync://' URLs in client mode \
+             (daemon-client transport). Use SSH (host:path) or run \
+             rsync-rs as the daemon side. See https://github.com/lihongjie0209/rsync-rs#known-gaps"
+        );
+    }
+
     // Build the SSH transport.
     let ssh_cmd = opts.rsh.as_deref().unwrap_or("ssh");
     let rsync_path = opts.rsync_path.as_deref().unwrap_or("rsync");

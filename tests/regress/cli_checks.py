@@ -172,15 +172,17 @@ def check_stats_output() -> Scenario:
                 capture_output=True)
             if proc.returncode != 0:
                 return f"--stats exited {proc.returncode}: {proc.stderr.decode(errors='replace')}"
-            err = proc.stderr.decode(errors="replace")
+            # C rsync writes --stats to stdout in client mode (rprintf(FINFO)),
+            # to stderr in server mode.  Match that: search both streams.
+            blob = (proc.stdout + proc.stderr).decode("utf-8", errors="replace")
             for needle in ("Number of files",
                            "Number of regular files transferred",
                            "Total file size",
                            "Total bytes sent",
                            "sent ",
                            "total size is"):
-                if needle not in err:
-                    return f"--stats missing {needle!r} in:\n{err}"
+                if needle not in blob:
+                    return f"--stats missing {needle!r} in:\n{blob}"
         return None
     return _make_check("cli__stats_output", fn)
 
