@@ -24,6 +24,44 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --release --quiet
 
+  linux-interop:
+    name: Linux interop (C ↔ rsync-rs, rsh + daemon)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-interop
+      - name: Install C rsync + ssh client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rsync openssh-client python3
+          rsync --version | head -n 2
+      - name: Build release
+        run: cargo build --release --locked
+      - name: Install rsh-style wrapper
+        run: |
+          # Universal wrapper: drops the host arg, exec's whatever
+          # rsync-path the client requested.  This makes the same wrapper
+          # serve both C-as-server and rsync-rs-as-server scenarios so
+          # interop is exercised in both directions.
+          sudo tee /usr/local/bin/wrapper >/dev/null <<'EOF'
+          #!/bin/sh
+          shift 1
+          exec "$@"
+          EOF
+          sudo chmod +x /usr/local/bin/wrapper
+      - name: Run regression suite (rsh + daemon, both directions)
+        env:
+          RSYNC_C: rsync
+          RSYNC_RS: ${{ github.workspace }}/target/release/rsync-rs
+          RSYNC_WRAPPER: /usr/local/bin/wrapper
+        run: |
+          export PATH="$PWD/target/release:$PATH"
+          python3 -m tests.regress --verbose --timeout 15
+
   windows-smoke:
     name: Windows smoke (${{ matrix.flavor }})
     needs: test
@@ -136,7 +174,7 @@ jobs:
   release:
     name: Publish release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, build, windows-smoke]
+    needs: [test, build, windows-smoke, linux-interop]
     runs-on: ubuntu-latest
     permissions:
       contents: write

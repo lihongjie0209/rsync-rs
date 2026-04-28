@@ -285,8 +285,18 @@ def make_sync_rs_pulls_from_c(flags: Sequence[str]) -> SyncCallable:
     """rsync-rs client pulls from a C rsync server."""
     def go(src: Path, dst: Path, ctx: ScenarioContext) -> subprocess.CompletedProcess:
         return _run([ctx.rsync_rs, *flags, "-e", ctx.wrapper,
-                     "--rsync-path=rsync",
+                     f"--rsync-path={ctx.rsync_c}",
                      f"dummy:{src}/", f"{dst}/"], ctx, timeout=ctx.timeout_s)
+    return go
+
+
+def make_sync_rs_push_to_c(flags: Sequence[str]) -> SyncCallable:
+    """rsync-rs client pushes to a C rsync server (the remote-shell wrapper
+    exec's C rsync because of --rsync-path)."""
+    def go(src: Path, dst: Path, ctx: ScenarioContext) -> subprocess.CompletedProcess:
+        return _run([ctx.rsync_rs, *flags, "-e", ctx.wrapper,
+                     f"--rsync-path={ctx.rsync_c}",
+                     f"{src}/", f"dummy:{dst}/"], ctx, timeout=ctx.timeout_s)
     return go
 
 

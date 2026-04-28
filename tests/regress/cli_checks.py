@@ -321,6 +321,189 @@ def check_daemon_pull_file() -> Scenario:
     return _make_check("cli__daemon_pull_file", fn)
 
 
+def _wait_listen(port: int, deadline_s: float = 2.0) -> bool:
+    import socket, time
+    deadline = time.time() + deadline_s
+    while time.time() < deadline:
+        try:
+            sk = socket.create_connection(("127.0.0.1", port), 0.2)
+            sk.close()
+            return True
+        except OSError:
+            time.sleep(0.05)
+    return False
+
+
+def _free_port() -> int:
+    import socket
+    s = socket.socket(); s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]; s.close()
+    return p
+
+
+def _kill(p: subprocess.Popen) -> None:
+    try:
+        p.terminate()
+        try: p.wait(timeout=2)
+        except subprocess.TimeoutExpired: p.kill()
+    except Exception:
+        pass
+
+
+def check_daemon_push_to_rs() -> Scenario:
+    """C rsync pushes a tree into rsync-rs --daemon (write-enabled module)."""
+    def fn(ctx: ScenarioContext) -> str | None:
+        import tempfile, time
+        port = _free_port()
+        with tempfile.TemporaryDirectory() as td:
+            mod_dir = Path(td) / "incoming"; mod_dir.mkdir()
+            cfg = Path(td) / "rsyncd.conf"
+            cfg.write_text(
+                f"[upload]\n  path = {mod_dir}\n  read only = no\n"
+                f"  use chroot = no\n"
+            )
+            src = Path(td) / "src"; src.mkdir()
+            (src / "alpha.txt").write_bytes(b"alpha")
+            (src / "beta.bin").write_bytes(bytes(range(64)) * 4)
+
+            daemon = subprocess.Popen(
+                [ctx.rsync_rs, "--daemon", "--no-detach",
+                 f"--config={cfg}", f"--port={port}"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                if not _wait_listen(port):
+                    return "rsync-rs daemon did not start within 2s"
+                proc = subprocess.run(
+                    ["rsync", "-a", f"{src}/",
+                     f"rsync://127.0.0.1:{port}/upload/"],
+                    capture_output=True, timeout=10)
+                if proc.returncode != 0:
+                    return (f"C->rs daemon push exit {proc.returncode}\n"
+                            f"stdout={proc.stdout.decode(errors='replace')}\n"
+                            f"stderr={proc.stderr.decode(errors='replace')}")
+                for name, want in [("alpha.txt", b"alpha"),
+                                   ("beta.bin", bytes(range(64)) * 4)]:
+                    got = (mod_dir / name).read_bytes()
+                    if got != want:
+                        return f"{name} mismatch: got={got[:32]!r}... want={want[:32]!r}..."
+            finally:
+                _kill(daemon)
+        return None
+    return _make_check("cli__daemon_push_to_rs", fn)
+
+
+def check_daemon_rs_push_to_c() -> Scenario:
+    """rsync-rs client pushes to a C rsync --daemon over rsync://."""
+    def fn(ctx: ScenarioContext) -> str | None:
+        import tempfile
+        if not _have_rsync_daemon(ctx):
+            return "skip: C rsync not available for daemon"
+        port = _free_port()
+        with tempfile.TemporaryDirectory() as td:
+            mod_dir = Path(td) / "incoming"; mod_dir.mkdir()
+            cfg = Path(td) / "rsyncd.conf"
+            pid = Path(td) / "rsyncd.pid"
+            log = Path(td) / "rsyncd.log"
+            cfg.write_text(
+                f"port = {port}\n"
+                f"pid file = {pid}\n"
+                f"log file = {log}\n"
+                f"use chroot = no\n"
+                f"\n[upload]\n"
+                f"  path = {mod_dir}\n"
+                f"  read only = no\n"
+            )
+            src = Path(td) / "src"; src.mkdir()
+            (src / "hello.txt").write_bytes(b"hello c daemon")
+            (src / "data.bin").write_bytes(bytes(range(128)) * 8)
+
+            daemon = subprocess.Popen(
+                [ctx.rsync_c, "--daemon", "--no-detach",
+                 f"--config={cfg}"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                if not _wait_listen(port):
+                    log_txt = log.read_text(errors='replace') if log.exists() else "(no log)"
+                    return f"C daemon did not start. log:\n{log_txt}"
+                proc = subprocess.run(
+                    [ctx.rsync_rs, "-a", f"{src}/",
+                     f"rsync://127.0.0.1:{port}/upload/"],
+                    capture_output=True, timeout=10)
+                if proc.returncode != 0:
+                    return (f"rs->C daemon push exit {proc.returncode}\n"
+                            f"stdout={proc.stdout.decode(errors='replace')}\n"
+                            f"stderr={proc.stderr.decode(errors='replace')}")
+                for name, want in [("hello.txt", b"hello c daemon"),
+                                   ("data.bin", bytes(range(128)) * 8)]:
+                    got = (mod_dir / name).read_bytes()
+                    if got != want:
+                        return f"{name} mismatch (size got={len(got)} want={len(want)})"
+            finally:
+                _kill(daemon)
+        return None
+    return _make_check("cli__daemon_rs_push_to_c", fn)
+
+
+def check_daemon_rs_pull_from_c() -> Scenario:
+    """rsync-rs client pulls from a C rsync --daemon over rsync://."""
+    def fn(ctx: ScenarioContext) -> str | None:
+        import tempfile
+        if not _have_rsync_daemon(ctx):
+            return "skip: C rsync not available for daemon"
+        port = _free_port()
+        with tempfile.TemporaryDirectory() as td:
+            mod_dir = Path(td) / "share"; mod_dir.mkdir()
+            (mod_dir / "hello.txt").write_bytes(b"hi from c daemon")
+            (mod_dir / "blob.bin").write_bytes(bytes(range(200)) * 5)
+            cfg = Path(td) / "rsyncd.conf"
+            pid = Path(td) / "rsyncd.pid"
+            log = Path(td) / "rsyncd.log"
+            cfg.write_text(
+                f"port = {port}\n"
+                f"pid file = {pid}\n"
+                f"log file = {log}\n"
+                f"use chroot = no\n"
+                f"\n[share]\n"
+                f"  path = {mod_dir}\n"
+                f"  read only = yes\n"
+            )
+            dst = Path(td) / "dst"; dst.mkdir()
+
+            daemon = subprocess.Popen(
+                [ctx.rsync_c, "--daemon", "--no-detach", f"--config={cfg}"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                if not _wait_listen(port):
+                    log_txt = log.read_text(errors='replace') if log.exists() else "(no log)"
+                    return f"C daemon did not start. log:\n{log_txt}"
+                proc = subprocess.run(
+                    [ctx.rsync_rs, "-a", f"rsync://127.0.0.1:{port}/share/",
+                     f"{dst}/"],
+                    capture_output=True, timeout=10)
+                if proc.returncode != 0:
+                    return (f"rs<-C daemon pull exit {proc.returncode}\n"
+                            f"stdout={proc.stdout.decode(errors='replace')}\n"
+                            f"stderr={proc.stderr.decode(errors='replace')}")
+                for name, want in [("hello.txt", b"hi from c daemon"),
+                                   ("blob.bin", bytes(range(200)) * 5)]:
+                    got = (dst / name).read_bytes()
+                    if got != want:
+                        return f"{name} mismatch (size got={len(got)} want={len(want)})"
+            finally:
+                _kill(daemon)
+        return None
+    return _make_check("cli__daemon_rs_pull_from_c", fn)
+
+
+def _have_rsync_daemon(ctx: ScenarioContext) -> bool:
+    """Best-effort check that ctx.rsync_c can run as a daemon."""
+    try:
+        proc = subprocess.run([ctx.rsync_c, "--version"], capture_output=True, timeout=3)
+        return proc.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+
+
 # ───────────────────────── Aggregator ─────────────────────────────────────
 
 
@@ -337,4 +520,7 @@ def all_cli_checks():
         check_error_format(),
         check_daemon_module_list(),
         check_daemon_pull_file(),
+        check_daemon_push_to_rs(),
+        check_daemon_rs_push_to_c(),
+        check_daemon_rs_pull_from_c(),
     ]

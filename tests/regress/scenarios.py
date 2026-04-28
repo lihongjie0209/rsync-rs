@@ -20,7 +20,7 @@ from typing import Iterable
 from .harness import (
     FileSpec, Fixture, Scenario,
     make_sync_local, make_sync_pull_via_wrapper, make_sync_push_via_wrapper,
-    make_sync_rs_pulls_from_c, make_sync_self,
+    make_sync_rs_pulls_from_c, make_sync_rs_push_to_c, make_sync_self,
     need_binary, need_symlink_support,
 )
 
@@ -187,6 +187,12 @@ def _rs_pulls_c(name: str, fx: Fixture, flags: list[str], **kw) -> Scenario:
     return Scenario(name=name, fixture=fx, sync=make_sync_rs_pulls_from_c(flags), flags=flags, **kw)
 
 
+def _rs_pushes_c(name: str, fx: Fixture, flags: list[str], **kw) -> Scenario:
+    """rsync-rs client pushes to a C server."""
+    kw.setdefault("skip_if", _both(need_binary("rsync"), need_binary("rsync-rs")))
+    return Scenario(name=name, fixture=fx, sync=make_sync_rs_push_to_c(flags), flags=flags, **kw)
+
+
 def _self(name: str, fx: Fixture, flags: list[str], **kw) -> Scenario:
     kw.setdefault("skip_if", need_binary("rsync-rs"))
     return Scenario(name=name, fixture=fx, sync=make_sync_self(flags), flags=flags, **kw)
@@ -298,6 +304,10 @@ def all_scenarios() -> list[Scenario]:
     # ── 4. rsync-rs client pulls from C server ────────────────────────────
     for fx in (fx_single_small(), fx_text_files()):
         sc.append(_rs_pulls_c(f"rs_pulls_c__{fx.name}__av", fx, ["-av"]))
+
+    # ── 4b. rsync-rs client pushes to C server (the new direction) ────────
+    for fx in (fx_single_small(), fx_text_files(), fx_nested_tree()):
+        sc.append(_rs_pushes_c(f"rs_pushes_c__{fx.name}__av", fx, ["-av"]))
 
     # ── 5. rsync-rs ↔ rsync-rs (self) ────────────────────────────────────
     for fx in (fx_single_small(), fx_text_files(), fx_nested_tree()):

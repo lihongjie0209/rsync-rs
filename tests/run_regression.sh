@@ -58,10 +58,16 @@ else
     fi
     if [[ ! -x /usr/local/bin/wrapper ]]; then
         TMP=$(mktemp)
+        # The wrapper acts as a fake `ssh`/`rsh`: invoked as
+        #   wrapper <host> <remote-cmd> <args...>
+        # We drop the host and exec whatever the client asked for via
+        # --rsync-path=... (which becomes <remote-cmd>).  This way the same
+        # wrapper works both when the remote is rsync-rs AND when it is the C
+        # rsync binary, so we can exercise interop in both directions.
         cat >"$TMP" <<'EOF'
 #!/bin/sh
-shift 2
-exec rsync-rs "$@"
+shift 1
+exec "$@"
 EOF
         chmod +x "$TMP"
         export RSYNC_WRAPPER="$TMP"
