@@ -38,7 +38,8 @@ Legend: ✅ implemented · ⚠️ partial · ❌ not yet
 | | `--update` (`-u`) | ✅ | Skip files where destination is newer than source — all directions verified |
 | | `--prune-empty-dirs` (`-m`) | ✅ | Omit empty directories from flist and dest — local + C-pulls verified |
 | | `--link-dest=DIR` | ✅ | Hardlink unchanged files from previous backup — local + rs-pulls-C verified |
-| Platforms | Linux x86_64, aarch64 (gnu+musl) | ✅ | CI build + tests |
+| | `--files-from=FILE` | ✅ | Transfer only paths listed in FILE (relative to source base) — local + rs-pulls-C verified |
+| Platforms |Linux x86_64, aarch64 (gnu+musl) | ✅ | CI build + tests |
 | | macOS x86_64, aarch64 | ✅ | CI build + tests |
 | | Windows x86_64 (MSVC) | ✅ | Local + self-loop daemon work; rsh transport over OpenSSH supported |
 
@@ -66,7 +67,7 @@ CI matrix per push (`.github/workflows/ci.yml`):
 | `Windows smoke (native)` | rsync-rs ↔ rsync-rs on Windows via local + cwRsync rsh |
 | `Windows smoke (interop)` | rsync-rs ↔ cwRsync (Cygwin C build) on Windows |
 | `Linux interop` | 60 scenarios: local + rsh + daemon + checksum, rs↔rs and rs↔C 3.2.7 — **60/60 pass** |
-| `Linux interop (extended)` | 104 scenarios total incl. filter/update/prune/link-dest flags — **104/104 pass** |
+| `Linux interop (extended)` | 106 scenarios total incl. filter/update/prune/link-dest/files-from flags — **106/106 pass** |
 
 ### Known interop gaps
 

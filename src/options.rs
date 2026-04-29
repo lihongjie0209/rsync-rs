@@ -92,6 +92,8 @@ pub struct Options {
 
     // File selection
     #[arg(long)]
+    pub files_from: Option<String>,
+    #[arg(long)]
     pub exclude: Vec<String>,
     #[arg(long)]
     pub exclude_from: Vec<String>,
@@ -465,6 +467,9 @@ impl Options {
         }
         for ld in &self.link_dest {
             args.push(format!("--link-dest={ld}"));
+        }
+        if let Some(ref ff) = self.files_from {
+            args.push(format!("--files-from={ff}"));
         }
         if self.cvs_exclude {
             args.push("--cvs-exclude".into());

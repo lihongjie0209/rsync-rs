@@ -765,21 +765,30 @@ pub fn run_server_io<R: std::io::Read, W: std::io::Write>(
         // Step 6: Build file list from local source paths.
         // Files are sent with names relative to the source directory root.
         let mut flist = crate::protocol::types::FileList::new();
-        for src in &src_paths {
-            let path = std::path::Path::new(src);
-            if path.is_dir() {
-                // Add the root '.' directory entry first so C rsync runs
-                // delete_in_dir() for the root (FLAG_CONTENT_DIR via XMIT_TOP_DIR).
-                if let Ok(meta) = path.metadata() {
-                    let mut root_fi = file_info_from_meta(".", None, &meta);
-                    root_fi.flags |= crate::protocol::constants::FLAG_TOP_DIR;
-                    flist.files.push(root_fi);
+        if let Some(ref ff) = server_flags.files_from {
+            // --files-from: use first src as base dir, list from file.
+            let base = std::path::Path::new(src_paths.first().copied().unwrap_or("."));
+            build_flist_from_files_from(
+                base, ff, recursive, &mut flist, &client_filter,
+                server_flags.max_size, server_flags.min_size, server_flags.prune_empty_dirs,
+            ).ok();
+        } else {
+            for src in &src_paths {
+                let path = std::path::Path::new(src);
+                if path.is_dir() {
+                    // Add the root '.' directory entry first so C rsync runs
+                    // delete_in_dir() for the root (FLAG_CONTENT_DIR via XMIT_TOP_DIR).
+                    if let Ok(meta) = path.metadata() {
+                        let mut root_fi = file_info_from_meta(".", None, &meta);
+                        root_fi.flags |= crate::protocol::constants::FLAG_TOP_DIR;
+                        flist.files.push(root_fi);
+                    }
+                    walk_source_dir(path, "", recursive, &mut flist, &client_filter, server_flags.max_size, server_flags.min_size, server_flags.prune_empty_dirs);
+                } else if let Ok(meta) = std::fs::metadata(path) {
+                    let name =
+                        path.file_name().and_then(|n| n.to_str()).unwrap_or(src).to_string();
+                    flist.files.push(file_info_from_meta(&name, None, &meta));
                 }
-                walk_source_dir(path, "", recursive, &mut flist, &client_filter, server_flags.max_size, server_flags.min_size, server_flags.prune_empty_dirs);
-            } else if let Ok(meta) = std::fs::metadata(path) {
-                let name =
-                    path.file_name().and_then(|n| n.to_str()).unwrap_or(src).to_string();
-                flist.files.push(file_info_from_meta(&name, None, &meta));
             }
         }
         crate::flist::flist_sort(&mut flist);
@@ -1297,32 +1306,44 @@ fn run_client_protocol<R: std::io::Read, W: std::io::Write>(
         let local_filter = crate::filter::FilterList::from_options(&opts)
             .unwrap_or_default();
         let mut flist = crate::protocol::types::FileList::new();
-        for src in sources {
-            let p = std::path::Path::new(src);
-            let recursive = opts.recursive;
-            if p.is_dir() {
-                // Add the root '.' directory entry so C rsync runs
-                // delete_in_dir() for the root when --delete is active.
-                if let Ok(meta) = p.metadata() {
-                    let mut root_fi = file_info_from_meta(".", None, &meta);
-                    root_fi.flags |= crate::protocol::constants::FLAG_TOP_DIR;
-                    flist.files.push(root_fi);
-                }
-                walk_source_dir(p, "", recursive, &mut flist, &local_filter,
-                    opts.max_size.as_deref().and_then(crate::util::parse_size_str),
-                    opts.min_size.as_deref().and_then(crate::util::parse_size_str),
-                    opts.prune_empty_dirs,
-                );
-            } else if let Ok(meta) = p.symlink_metadata() {
-                let name =
-                    p.file_name().and_then(|n| n.to_str()).unwrap_or(src).to_string();
-                let mut fi = file_info_from_meta(&name, None, &meta);
-                if meta.file_type().is_symlink() {
-                    if let Ok(t) = std::fs::read_link(p) {
-                        fi.link_target = Some(t.to_string_lossy().into_owned());
+        if let Some(ref ff) = opts.files_from {
+            // --files-from: use first source as base dir, list from file.
+            let base = std::path::Path::new(sources.first().map(|s| s.as_str()).unwrap_or("."));
+            build_flist_from_files_from(
+                base, ff, opts.recursive,
+                &mut flist, &local_filter,
+                opts.max_size.as_deref().and_then(crate::util::parse_size_str),
+                opts.min_size.as_deref().and_then(crate::util::parse_size_str),
+                opts.prune_empty_dirs,
+            )?;
+        } else {
+            for src in sources {
+                let p = std::path::Path::new(src);
+                let recursive = opts.recursive;
+                if p.is_dir() {
+                    // Add the root '.' directory entry so C rsync runs
+                    // delete_in_dir() for the root when --delete is active.
+                    if let Ok(meta) = p.metadata() {
+                        let mut root_fi = file_info_from_meta(".", None, &meta);
+                        root_fi.flags |= crate::protocol::constants::FLAG_TOP_DIR;
+                        flist.files.push(root_fi);
                     }
+                    walk_source_dir(p, "", recursive, &mut flist, &local_filter,
+                        opts.max_size.as_deref().and_then(crate::util::parse_size_str),
+                        opts.min_size.as_deref().and_then(crate::util::parse_size_str),
+                        opts.prune_empty_dirs,
+                    );
+                } else if let Ok(meta) = p.symlink_metadata() {
+                    let name =
+                        p.file_name().and_then(|n| n.to_str()).unwrap_or(src).to_string();
+                    let mut fi = file_info_from_meta(&name, None, &meta);
+                    if meta.file_type().is_symlink() {
+                        if let Ok(t) = std::fs::read_link(p) {
+                            fi.link_target = Some(t.to_string_lossy().into_owned());
+                        }
+                    }
+                    flist.files.push(fi);
                 }
-                flist.files.push(fi);
             }
         }
         crate::flist::flist_sort(&mut flist);
@@ -1578,6 +1599,66 @@ fn walk_source_dir(
             flist.files.push(file_info_from_meta(&name, dirname.as_deref(), &meta));
         }
     }
+}
+
+/// Build a file list from a `--files-from` file.  Each non-blank, non-comment
+/// line in `files_from_path` is treated as a path relative to `base_dir`.
+/// The path structure is preserved in the flist (relative to base_dir).
+fn build_flist_from_files_from(
+    base_dir: &std::path::Path,
+    files_from_path: &str,
+    recursive: bool,
+    flist: &mut crate::protocol::types::FileList,
+    filter: &crate::filter::FilterList,
+    max_size: Option<i64>,
+    min_size: Option<i64>,
+    prune_empty_dirs: bool,
+) -> anyhow::Result<()> {
+    let content = std::fs::read_to_string(files_from_path)
+        .with_context(|| format!("reading --files-from={files_from_path}"))?;
+    for raw_line in content.lines() {
+        // Strip whitespace; skip blank lines and comments.
+        let line = raw_line.trim().trim_start_matches('/');
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let full_path = base_dir.join(line);
+        let meta = match full_path.symlink_metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let ft = meta.file_type();
+        if ft.is_dir() {
+            let (dirname, name) = split_rel(line);
+            flist.files.push(file_info_from_meta(&name, dirname.as_deref(), &meta));
+            if recursive {
+                let before = flist.files.len();
+                walk_source_dir(&full_path, line, true, flist, filter, max_size, min_size, prune_empty_dirs);
+                if prune_empty_dirs && flist.files.len() == before {
+                    flist.files.pop(); // remove the empty dir entry
+                }
+            }
+        } else if ft.is_symlink() {
+            let (dirname, name) = split_rel(line);
+            let mut fi = file_info_from_meta(&name, dirname.as_deref(), &meta);
+            if let Ok(target) = std::fs::read_link(&full_path) {
+                fi.link_target = Some(target.to_string_lossy().into_owned());
+            }
+            flist.files.push(fi);
+        } else {
+            // Regular file: apply size filters.
+            let file_size = meta.len() as i64;
+            if let Some(max) = max_size {
+                if file_size > max { continue; }
+            }
+            if let Some(min) = min_size {
+                if file_size < min { continue; }
+            }
+            let (dirname, name) = split_rel(line);
+            flist.files.push(file_info_from_meta(&name, dirname.as_deref(), &meta));
+        }
+    }
+    Ok(())
 }
 
 /// Split a forward-slash relative path into `(dirname, basename)`.

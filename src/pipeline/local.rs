@@ -88,9 +88,18 @@ pub fn run_local(opts: &Options, sources: &[String], dest: &str) -> Result<Local
     let mut kept: HashSet<PathBuf> = HashSet::new();
     let mut links = LinkMap::default();
 
-    for src in sources {
-        copy_one(opts, src, &dest_path, dest_is_dir, &filter, max_size, min_size, &mut report, &mut kept, &mut links)
-            .with_context(|| format!("copying {src}"))?;
+    if let Some(ref ff) = opts.files_from {
+        // --files-from: source[0] is the base dir; only copy listed paths.
+        let base = PathBuf::from(sources.first().map(|s| s.as_str()).unwrap_or("."));
+        copy_from_files_from(
+            opts, &base, ff, &dest_path, &filter,
+            max_size, min_size, &mut report, &mut kept, &mut links,
+        )?;
+    } else {
+        for src in sources {
+            copy_one(opts, src, &dest_path, dest_is_dir, &filter, max_size, min_size, &mut report, &mut kept, &mut links)
+                .with_context(|| format!("copying {src}"))?;
+        }
     }
 
     if opts.delete && dest_is_dir {
@@ -98,6 +107,78 @@ pub fn run_local(opts: &Options, sources: &[String], dest: &str) -> Result<Local
     }
 
     Ok(report)
+}
+
+/// Copy only the paths listed in a `--files-from` file.
+/// `base_dir` is the source root; each line in `files_from_path` is a relative
+/// path.  The same relative structure is recreated under `dest_root`.
+fn copy_from_files_from(
+    opts: &Options,
+    base_dir: &Path,
+    files_from_path: &str,
+    dest_root: &Path,
+    filter: &crate::filter::FilterList,
+    max_size: Option<i64>,
+    min_size: Option<i64>,
+    report: &mut LocalReport,
+    kept: &mut HashSet<PathBuf>,
+    links: &mut LinkMap,
+) -> Result<()> {
+    let content = std::fs::read_to_string(files_from_path)
+        .with_context(|| format!("reading --files-from={files_from_path}"))?;
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim().trim_start_matches('/');
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let rel = PathBuf::from(line);
+        let src_path = base_dir.join(&rel);
+        let meta = match src_path.symlink_metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let dest_path = dest_root.join(&rel);
+
+        if meta.is_dir() {
+            if !opts.dry_run {
+                fs::create_dir_all(&dest_path)
+                    .with_context(|| format!("create_dir_all {dest_path:?}"))?;
+            }
+            if opts.recursive || opts.archive {
+                let sub = copy_dir_recursive(
+                    opts, &src_path, &dest_path, rel.clone(),
+                    filter, max_size, min_size, report, kept, links,
+                )?;
+                if sub == 0 && opts.prune_empty_dirs {
+                    if !opts.dry_run { let _ = fs::remove_dir(&dest_path); }
+                } else {
+                    kept.insert(rel.clone());
+                }
+            } else {
+                kept.insert(rel.clone());
+            }
+        } else {
+            if meta.is_file() {
+                let file_size = meta.len() as i64;
+                if let Some(max) = max_size {
+                    if file_size > max { continue; }
+                }
+                if let Some(min) = min_size {
+                    if file_size < min { continue; }
+                }
+            }
+            if let Some(parent) = dest_path.parent() {
+                if !opts.dry_run && !parent.as_os_str().is_empty() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("create_dir_all {parent:?}"))?;
+                }
+            }
+            copy_entry(opts, &src_path, &dest_path, &meta, &rel, report, links)?;
+            kept.insert(rel);
+        }
+    }
+    Ok(())
 }
 
 /// Copy a single source argument (file *or* directory) into `dest`.

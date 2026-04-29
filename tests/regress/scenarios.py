@@ -23,6 +23,7 @@ from .harness import (
     make_sync_rs_pulls_from_c, make_sync_rs_push_to_c, make_sync_self,
     make_sync_batch, make_sync_backup_dir,
     make_sync_local_link_dest, make_sync_rs_pulls_c_link_dest,
+    make_sync_local_files_from, make_sync_rs_pulls_c_files_from,
     need_binary, need_symlink_support,
 )
 
@@ -693,6 +694,74 @@ def all_scenarios() -> list[Scenario]:
         flags=_link_dest_flags,
         setup_dst=_setup_link_dest,
         verify_dst=_verify_link_dest,
+        skip_if=_both(need_binary("rsync"), need_binary("rsync-rs")),
+    ))
+
+    # ── 16. --files-from: transfer only explicitly listed paths ──────────────
+    # Fixture: text_files has readme.md, LICENSE, .gitignore
+    # files_from lists only two of the three; verify only those appear in dst.
+    # NOTE: files_from_path is created at a fixed path in /tmp so it's accessible
+    # during the sync.  Using a lambda-captured path that's written per-test.
+    import tempfile as _tempfile
+
+    _ff_listed   = ["readme.md", "LICENSE"]   # listed in files-from file
+    _ff_unlisted = [".gitignore"]              # NOT listed; should NOT appear in dst
+
+    def _setup_files_from_file(dst: Path) -> None:
+        """Write the --files-from list file into the temp dir alongside dst."""
+        ff = dst.parent / "files_from.txt"
+        ff.write_text("readme.md\nLICENSE\n")
+
+    def _verify_files_from(dst: Path) -> "str | None":
+        errs = []
+        for name in _ff_listed:
+            if not (dst / name).exists():
+                errs.append(f"listed file missing from dst: {name}")
+        for name in _ff_unlisted:
+            if (dst / name).exists():
+                errs.append(f"unlisted file appeared in dst: {name}")
+        return "; ".join(errs) if errs else None
+
+    def _make_ff_sync_local() -> "SyncCallable":
+        def go(src: Path, dst: Path, ctx) -> "subprocess.CompletedProcess":
+            ff = dst.parent / "files_from.txt"
+            import subprocess
+            return subprocess.run(
+                [ctx.rsync_rs, "-a", f"--files-from={ff}", f"{src}/", f"{dst}/"],
+                capture_output=True, timeout=ctx.timeout_s,
+            )
+        return go
+
+    def _make_ff_sync_rs_pulls_c() -> "SyncCallable":
+        def go(src: Path, dst: Path, ctx) -> "subprocess.CompletedProcess":
+            ff = dst.parent / "files_from.txt"
+            import subprocess
+            return subprocess.run(
+                [ctx.rsync_rs, "-a", f"--files-from={ff}",
+                 "-e", ctx.wrapper, f"--rsync-path={ctx.rsync_c}",
+                 f"dummy:{src}/", f"{dst}/"],
+                capture_output=True, timeout=ctx.timeout_s,
+            )
+        return go
+
+    sc.append(Scenario(
+        name="local__files_from__a",
+        fixture=fx_text_files(),
+        sync=_make_ff_sync_local(),
+        flags=["-a"],
+        setup_dst=_setup_files_from_file,
+        verify_dst=_verify_files_from,
+        ignore_paths=_ff_unlisted,
+        skip_if=need_binary("rsync-rs"),
+    ))
+    sc.append(Scenario(
+        name="rs_pulls_c__files_from__a",
+        fixture=fx_text_files(),
+        sync=_make_ff_sync_rs_pulls_c(),
+        flags=["-a"],
+        setup_dst=_setup_files_from_file,
+        verify_dst=_verify_files_from,
+        ignore_paths=_ff_unlisted,
         skip_if=_both(need_binary("rsync"), need_binary("rsync-rs")),
     ))
 

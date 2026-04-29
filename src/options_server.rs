@@ -60,6 +60,7 @@ pub struct ServerFlags {
     pub max_size: Option<i64>,
     pub min_size: Option<i64>,
     pub link_dest: Vec<String>,
+    pub files_from: Option<String>,
     /// Unrecognised characters seen in the bundled token (excluding the
     /// `-e` extension tail, which is consumed silently).
     pub unknown: String,
@@ -219,6 +220,9 @@ where
                 "prune-empty-dirs" => { flags.prune_empty_dirs = true; }
                 _ if rest.starts_with("link-dest=") => {
                     flags.link_dest.push(rest["link-dest=".len()..].to_string());
+                }
+                _ if rest.starts_with("files-from=") => {
+                    flags.files_from = Some(rest["files-from=".len()..].to_string());
                 }
                 _ if rest.starts_with("max-size=") => {
                     flags.max_size = crate::util::parse_size_str(&rest["max-size=".len()..]);

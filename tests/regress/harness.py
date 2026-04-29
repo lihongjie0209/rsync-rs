@@ -388,6 +388,36 @@ def make_sync_rs_pulls_c_link_dest(flags: Sequence[str], link_dest_subdir: str =
         )
     return go
 
+
+def make_sync_local_files_from(flags: Sequence[str], files_from_path: str) -> SyncCallable:
+    """Local sync with --files-from=<path>.
+
+    ``files_from_path`` is an ABSOLUTE path to a text file listing source-relative
+    paths to transfer.  The caller is responsible for creating it before the sync.
+    """
+    def go(src: Path, dst: Path, ctx: ScenarioContext) -> subprocess.CompletedProcess:
+        return _run(
+            [ctx.rsync_rs, *flags, f"--files-from={files_from_path}", f"{src}/", f"{dst}/"],
+            ctx, timeout=ctx.timeout_s,
+        )
+    return go
+
+
+def make_sync_rs_pulls_c_files_from(flags: Sequence[str], files_from_path: str) -> SyncCallable:
+    """rsync-rs pulls from C rsync with --files-from (rsync-rs is receiver).
+
+    The ``--files-from`` flag is applied by rsync-rs (client side) to control which
+    server-side files are requested.
+    """
+    def go(src: Path, dst: Path, ctx: ScenarioContext) -> subprocess.CompletedProcess:
+        return _run(
+            [ctx.rsync_rs, *flags, f"--files-from={files_from_path}",
+             "-e", ctx.wrapper, f"--rsync-path={ctx.rsync_c}",
+             f"dummy:{src}/", f"{dst}/"],
+            ctx, timeout=ctx.timeout_s,
+        )
+    return go
+
 # ───────────────────────── Runner ───────────────────────────────────────────
 
 
