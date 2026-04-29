@@ -888,6 +888,7 @@ pub fn run_server_io<R: std::io::Read, W: std::io::Write>(
             use_zlib, opts.inplace, opts.itemize_changes, use_checksum,
             server_flags.update, server_flags.ignore_existing,
             server_flags.max_size, server_flags.min_size,
+            &server_flags.link_dest,
         )
         .context("server-receiver run")?;
         stats.deleted_files = del_files;
@@ -1419,6 +1420,7 @@ fn run_client_protocol<R: std::io::Read, W: std::io::Write>(
             opts.update, opts.ignore_existing,
             opts.max_size.as_deref().and_then(crate::util::parse_size_str),
             opts.min_size.as_deref().and_then(crate::util::parse_size_str),
+            &opts.link_dest,
         ).context("client-receiver run")?;
         stats.deleted_files = del_files;
         stats.deleted_dirs = del_dirs;

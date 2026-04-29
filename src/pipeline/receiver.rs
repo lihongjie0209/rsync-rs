@@ -6,7 +6,7 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -205,6 +205,7 @@ pub fn run_server_receiver<R: Read, W: Write>(
     ignore_existing: bool,
     max_size: Option<i64>,
     min_size: Option<i64>,
+    link_dest: &[String],
 ) -> Result<Stats> {
     use crate::delta::match_blocks::{write_sum_bufs, write_sum_head};
     use crate::fileops::slurp_file;
@@ -279,6 +280,60 @@ pub fn run_server_receiver<R: Read, W: Write>(
                 }
             };
             if dest_newer {
+                continue;
+            }
+        }
+
+        // --link-dest: if a candidate file in link_dest matches size+mtime,
+        // hardlink it to dest instead of requesting a transfer.
+        if !link_dest.is_empty() {
+            let mut linked = false;
+            'ld: for ld_str in link_dest {
+                // Relative link-dest is resolved relative to dest_dir.
+                let ld_root = if Path::new(ld_str).is_relative() {
+                    dest_dir.join(ld_str)
+                } else {
+                    PathBuf::from(ld_str)
+                };
+                let ld_path = ld_root.join(fi.path());
+                if let Ok(ld_meta) = fs::symlink_metadata(&ld_path) {
+                    if !ld_meta.file_type().is_file() {
+                        continue;
+                    }
+                    if ld_meta.len() == fi.size as u64 {
+                        let mtime_ok;
+                        #[cfg(unix)] {
+                            use std::os::unix::fs::MetadataExt;
+                            mtime_ok = ld_meta.mtime() == fi.modtime;
+                        }
+                        #[cfg(not(unix))] {
+                            mtime_ok = ld_meta.modified().ok()
+                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                .map(|d| d.as_secs() as i64 == fi.modtime)
+                                .unwrap_or(false);
+                        }
+                        if mtime_ok {
+                            // Ensure dest parent dir exists.
+                            if let Some(parent) = dest_path.parent() {
+                                let _ = fs::create_dir_all(parent);
+                            }
+                            // Atomic hardlink: link to temp sibling then rename.
+                            let tmp = dest_path.with_extension("__ldtmp__");
+                            let _ = fs::remove_file(&tmp);
+                            if fs::hard_link(&ld_path, &tmp).is_ok() {
+                                if fs::rename(&tmp, &dest_path).is_ok() {
+                                    stats.xferred_files += 1;
+                                    linked = true;
+                                    break 'ld;
+                                } else {
+                                    let _ = fs::remove_file(&tmp);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if linked {
                 continue;
             }
         }

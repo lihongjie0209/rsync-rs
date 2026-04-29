@@ -350,6 +350,61 @@ fn copy_entry(
         }
     }
 
+    // --link-dest: if a matching file exists in a link_dest dir (same size+mtime),
+    // hardlink from there to dest instead of copying from source.
+    if !opts.link_dest.is_empty() && ft.is_file() {
+        // dest_root is the directory containing the top-level dest; we need to
+        // resolve relative link_dest against it.  Since `copy_entry` doesn't
+        // receive dest_root directly, we derive it: walk up from `dest` by
+        // the same number of components as `rel`.
+        let depth = rel.components().count();
+        let dest_root: PathBuf = (0..depth).fold(dest.to_path_buf(), |p, _| {
+            p.parent().map(|q| q.to_path_buf()).unwrap_or(p)
+        });
+        for ld_str in &opts.link_dest {
+            let ld_root = if std::path::Path::new(ld_str).is_relative() {
+                dest_root.join(ld_str)
+            } else {
+                PathBuf::from(ld_str)
+            };
+            let ld_path = ld_root.join(rel);
+            if let Ok(ld_meta) = fs::symlink_metadata(&ld_path) {
+                if !ld_meta.file_type().is_file() {
+                    continue;
+                }
+                if ld_meta.len() == meta.len() {
+                    let mtimes_match = ld_meta.modified().ok() == meta.modified().ok();
+                    if mtimes_match {
+                        if !opts.dry_run {
+                            if let Some(parent) = dest.parent() {
+                                if !parent.as_os_str().is_empty() {
+                                    let _ = fs::create_dir_all(parent);
+                                }
+                            }
+                            let tmp = dest.with_extension("__ldtmp__");
+                            let _ = fs::remove_file(&tmp);
+                            if fs::hard_link(&ld_path, &tmp).is_ok()
+                                && fs::rename(&tmp, dest).is_ok()
+                            {
+                                // hardlink created; fall through to verbose/stats
+                            } else {
+                                let _ = fs::remove_file(&tmp);
+                                // Fall through to normal copy
+                                break;
+                            }
+                        }
+                        if opts.verbose > 0 {
+                            println!("{}", rel_display(rel));
+                        }
+                        report.hardlinked.push(dest.to_path_buf());
+                        report.stats.xferred_files += 1;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
     // Compute itemize iflags for this entry.
     let iflags = if opts.itemize_changes {
         use crate::protocol::constants::*;

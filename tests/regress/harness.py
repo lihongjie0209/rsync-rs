@@ -358,6 +358,36 @@ def make_sync_backup_dir(flags: Sequence[str], backup_subdir: str = "bak") -> Sy
         )
     return go
 
+
+def make_sync_local_link_dest(flags: Sequence[str], link_dest_subdir: str = "link_dest") -> SyncCallable:
+    """Local sync with --link-dest=<sibling_dir>.
+
+    The sibling directory (``link_dest_subdir`` next to ``dst``) is expected
+    to be pre-populated by the scenario's ``setup_dst`` callback to simulate
+    a previous backup.  The factory appends the absolute ``--link-dest`` path
+    at runtime so the scenario can use a fixture-relative path.
+    """
+    def go(src: Path, dst: Path, ctx: ScenarioContext) -> subprocess.CompletedProcess:
+        ld = dst.parent / link_dest_subdir
+        return _run(
+            [ctx.rsync_rs, *flags, f"--link-dest={ld}", f"{src}/", f"{dst}/"],
+            ctx, timeout=ctx.timeout_s,
+        )
+    return go
+
+
+def make_sync_rs_pulls_c_link_dest(flags: Sequence[str], link_dest_subdir: str = "link_dest") -> SyncCallable:
+    """rsync-rs pulls from C with --link-dest=<sibling_dir> (rsync-rs is receiver)."""
+    def go(src: Path, dst: Path, ctx: ScenarioContext) -> subprocess.CompletedProcess:
+        ld = dst.parent / link_dest_subdir
+        return _run(
+            [ctx.rsync_rs, *flags, f"--link-dest={ld}",
+             "-e", ctx.wrapper, f"--rsync-path={ctx.rsync_c}",
+             f"dummy:{src}/", f"{dst}/"],
+            ctx, timeout=ctx.timeout_s,
+        )
+    return go
+
 # ───────────────────────── Runner ───────────────────────────────────────────
 
 

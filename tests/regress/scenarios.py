@@ -22,6 +22,7 @@ from .harness import (
     make_sync_local, make_sync_pull_via_wrapper, make_sync_push_via_wrapper,
     make_sync_rs_pulls_from_c, make_sync_rs_push_to_c, make_sync_self,
     make_sync_batch, make_sync_backup_dir,
+    make_sync_local_link_dest, make_sync_rs_pulls_c_link_dest,
     need_binary, need_symlink_support,
 )
 
@@ -638,6 +639,62 @@ def all_scenarios() -> list[Scenario]:
                           ignore_paths=_prune_absent_files, verify_dst=_verify_prune_empty))
     sc.append(_c_pulls("c_pulls__prune_empty_dirs__a", fx_prune_dirs, _prune_flags,
                        ignore_paths=_prune_absent_files, verify_dst=_verify_prune_empty))
+
+    # ── 15. --link-dest: hardlink unchanged files from a previous backup ─────
+    # The "previous backup" is pre-populated by setup_dst (as link_dest/ sibling
+    # of dst) with the same files as the source.  After sync, every file in dst
+    # should be a hardlink to the corresponding file in link_dest/.
+    def _setup_link_dest(dst: Path) -> None:
+        """Populate link_dest/ (sibling of dst) by copying src/ preserving mtimes."""
+        import shutil
+        src = dst.parent / "src"
+        ld = dst.parent / "link_dest"
+        if src.exists():
+            shutil.copytree(src, ld, copy_function=shutil.copy2)
+        else:
+            ld.mkdir(parents=True, exist_ok=True)
+
+    def _verify_link_dest(dst: Path) -> "str | None":
+        """Every file in dst should be a hardlink to link_dest/."""
+        ld = dst.parent / "link_dest"
+        errs = []
+        for name in ("readme.md", "LICENSE", ".gitignore"):
+            dp = dst / name
+            lp = ld / name
+            if not dp.exists():
+                errs.append(f"{name} missing from dst")
+                continue
+            if not lp.exists():
+                errs.append(f"{name} missing from link_dest (setup error)")
+                continue
+            try:
+                ds = dp.stat()
+                ls = lp.stat()
+                if ds.st_ino != ls.st_ino:
+                    errs.append(f"{name} not hardlinked (different inodes: {ds.st_ino} vs {ls.st_ino})")
+            except OSError as e:
+                errs.append(f"{name} stat error: {e}")
+        return "; ".join(errs) if errs else None
+
+    _link_dest_flags = ["-a"]  # --link-dest is appended dynamically by the sync factory
+    sc.append(Scenario(
+        name="local__link_dest__a",
+        fixture=fx_text_files(),
+        sync=make_sync_local_link_dest(_link_dest_flags),
+        flags=_link_dest_flags,
+        setup_dst=_setup_link_dest,
+        verify_dst=_verify_link_dest,
+        skip_if=need_binary("rsync-rs"),
+    ))
+    sc.append(Scenario(
+        name="rs_pulls_c__link_dest__a",
+        fixture=fx_text_files(),
+        sync=make_sync_rs_pulls_c_link_dest(_link_dest_flags),
+        flags=_link_dest_flags,
+        setup_dst=_setup_link_dest,
+        verify_dst=_verify_link_dest,
+        skip_if=_both(need_binary("rsync"), need_binary("rsync-rs")),
+    ))
 
     return sc
 

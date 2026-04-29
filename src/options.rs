@@ -155,6 +155,10 @@ pub struct Options {
     pub backup_dir: Option<String>,
     #[arg(long)]
     pub suffix: Option<String>,
+    /// Use DIR as a basis for hardlinks; files matching size+mtime are
+    /// linked rather than transferred (can be given multiple times).
+    #[arg(long)]
+    pub link_dest: Vec<String>,
 
     // Paths
     #[arg(long)]
@@ -458,6 +462,9 @@ impl Options {
         }
         if let Some(ref bd) = self.backup_dir {
             args.push(format!("--backup-dir={bd}"));
+        }
+        for ld in &self.link_dest {
+            args.push(format!("--link-dest={ld}"));
         }
         if self.cvs_exclude {
             args.push("--cvs-exclude".into());
