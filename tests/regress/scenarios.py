@@ -544,6 +544,101 @@ def all_scenarios() -> list[Scenario]:
     sc.append(_rs_pushes_c("rs_pushes_c__min_size__a", fx_mixed_sizes(), _size_flags_min,
                            ignore_paths=_size_absent_min, verify_dst=_verify_min_size))
 
+    # ── 12. --ignore-existing: don't overwrite files already at dest ─────────
+    def _setup_ignore_existing(dst: Path) -> None:
+        p = dst / "readme.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"OLD_CONTENT_PRESERVED\n")
+
+    def _verify_ignore_existing(dst: Path) -> "str | None":
+        p = dst / "readme.md"
+        if not p.exists():
+            return "readme.md missing from dst"
+        got = p.read_bytes()
+        if got != b"OLD_CONTENT_PRESERVED\n":
+            return f"readme.md was overwritten (got {got!r})"
+        # New files (not pre-existing) should still be synced.
+        for name in ("LICENSE", ".gitignore"):
+            if not (dst / name).exists():
+                return f"new file {name} not synced with --ignore-existing"
+        return None
+
+    _ignore_existing_flags = ["-a", "--ignore-existing"]
+    # readme.md differs between src and dst (pre-existing); skip tree diff for it.
+    sc.append(_local_only("local__ignore_existing__a", fx_text_files(), _ignore_existing_flags,
+                          setup_dst=_setup_ignore_existing, verify_dst=_verify_ignore_existing,
+                          ignore_paths=["readme.md"]))
+    sc.append(_rs_pulls_c("rs_pulls_c__ignore_existing__a", fx_text_files(), _ignore_existing_flags,
+                          setup_dst=_setup_ignore_existing, verify_dst=_verify_ignore_existing,
+                          ignore_paths=["readme.md"]))
+    sc.append(_c_pulls("c_pulls__ignore_existing__a", fx_text_files(), _ignore_existing_flags,
+                       setup_dst=_setup_ignore_existing, verify_dst=_verify_ignore_existing,
+                       ignore_paths=["readme.md"]))
+
+    # ── 13. --update (-u): skip files where dest is newer than source ────────
+    def _setup_update_newer_dst(dst: Path) -> None:
+        import os
+        p = dst / "readme.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"NEWER_AT_DST\n")
+        future = p.stat().st_mtime + 7200
+        os.utime(p, (future, future))
+
+    def _verify_update(dst: Path) -> "str | None":
+        p = dst / "readme.md"
+        if not p.exists():
+            return "readme.md missing from dst"
+        got = p.read_bytes()
+        if got != b"NEWER_AT_DST\n":
+            return f"readme.md was overwritten despite newer dest (got {got!r})"
+        # New/old files should still be synced.
+        for name in ("LICENSE", ".gitignore"):
+            if not (dst / name).exists():
+                return f"new file {name} not synced with --update"
+        return None
+
+    _update_flags = ["-a", "-u"]
+    # readme.md differs between src and dst (newer at dst); skip tree diff for it.
+    sc.append(_local_only("local__update__a", fx_text_files(), _update_flags,
+                          setup_dst=_setup_update_newer_dst, verify_dst=_verify_update,
+                          ignore_paths=["readme.md"]))
+    sc.append(_rs_pulls_c("rs_pulls_c__update__a", fx_text_files(), _update_flags,
+                          setup_dst=_setup_update_newer_dst, verify_dst=_verify_update,
+                          ignore_paths=["readme.md"]))
+    sc.append(_c_pulls("c_pulls__update__a", fx_text_files(), _update_flags,
+                       setup_dst=_setup_update_newer_dst, verify_dst=_verify_update,
+                       ignore_paths=["readme.md"]))
+
+    # ── 14. --prune-empty-dirs (-m): omit empty directories ─────────────────
+    fx_prune_dirs = Fixture(
+        name="prune_dirs",
+        files=[
+            FileSpec("has_files/data.txt", content=b"data\n"),
+            FileSpec("only_logs/debug.log", content=b"log\n"),
+            FileSpec("only_logs/trace.log", content=b"trace\n"),
+        ],
+    )
+    _prune_flags = ["-a", "--prune-empty-dirs", "--exclude=*.log"]
+    _prune_present = ["has_files/data.txt"]
+    _prune_absent_files = ["only_logs/debug.log", "only_logs/trace.log"]
+
+    def _verify_prune_empty(dst: Path) -> "str | None":
+        errs = []
+        for p in _prune_present:
+            if not (dst / p).exists():
+                errs.append(f"expected file missing: {p}")
+        for p in _prune_absent_files:
+            if (dst / p).exists():
+                errs.append(f"excluded file exists despite prune: {p}")
+        if (dst / "only_logs").exists():
+            errs.append("empty dir only_logs exists despite --prune-empty-dirs")
+        return "; ".join(errs) if errs else None
+
+    sc.append(_local_only("local__prune_empty_dirs__a", fx_prune_dirs, _prune_flags,
+                          ignore_paths=_prune_absent_files, verify_dst=_verify_prune_empty))
+    sc.append(_c_pulls("c_pulls__prune_empty_dirs__a", fx_prune_dirs, _prune_flags,
+                       ignore_paths=_prune_absent_files, verify_dst=_verify_prune_empty))
+
     return sc
 
 

@@ -201,6 +201,8 @@ pub fn run_server_receiver<R: Read, W: Write>(
     inplace: bool,
     itemize: bool,
     use_checksum: bool,
+    update: bool,
+    ignore_existing: bool,
     max_size: Option<i64>,
     min_size: Option<i64>,
 ) -> Result<Stats> {
@@ -247,6 +249,36 @@ pub fn run_server_receiver<R: Read, W: Write>(
         }
         if let Some(min) = min_size {
             if file_size < min {
+                continue;
+            }
+        }
+
+        // --ignore-existing: skip this file if it already exists at dest.
+        if ignore_existing && dest_path.exists() {
+            continue;
+        }
+
+        // --update: skip if dest file is newer than source.
+        if update {
+            let dest_newer = dest_path.exists() && {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    fs::metadata(&dest_path)
+                        .map(|m| m.mtime() > fi.modtime)
+                        .unwrap_or(false)
+                }
+                #[cfg(not(unix))]
+                {
+                    fs::metadata(&dest_path)
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as i64 > fi.modtime)
+                        .unwrap_or(false)
+                }
+            };
+            if dest_newer {
                 continue;
             }
         }

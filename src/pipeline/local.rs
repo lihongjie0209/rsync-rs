@@ -148,10 +148,17 @@ fn copy_one(
             fs::create_dir_all(&into)
                 .with_context(|| format!("create_dir_all {into:?}"))?;
         }
-        copy_dir_recursive(opts, &src_path, &into, PathBuf::new(), filter, max_size, min_size, report, kept, links)?;
-        // Keep the dest dir itself.
-        if let Ok(rel) = into.strip_prefix(dest_root) {
-            kept.insert(rel.to_path_buf());
+        let sub_count = copy_dir_recursive(opts, &src_path, &into, PathBuf::new(), filter, max_size, min_size, report, kept, links)?;
+        // With --prune-empty-dirs, don't keep the top-level dest dir if nothing was copied.
+        if sub_count == 0 && opts.prune_empty_dirs && dest_is_dir {
+            if !opts.dry_run {
+                let _ = fs::remove_dir(&into);
+            }
+        } else {
+            // Keep the dest dir itself.
+            if let Ok(rel) = into.strip_prefix(dest_root) {
+                kept.insert(rel.to_path_buf());
+            }
         }
     } else {
         // Regular file (or symlink/special).  Compute final destination.
@@ -191,6 +198,9 @@ fn copy_one(
 /// Recursively walk `src_dir` copying into `dest_dir`.  `prefix` is the
 /// path relative to the original source root, used for keep-tracking and
 /// verbose output.
+///
+/// Returns the number of non-directory entries (files, symlinks, specials)
+/// that were actually processed.  Used by --prune-empty-dirs.
 fn copy_dir_recursive(
     opts: &Options,
     src_dir: &Path,
@@ -202,9 +212,11 @@ fn copy_dir_recursive(
     report: &mut LocalReport,
     kept: &mut HashSet<PathBuf>,
     links: &mut LinkMap,
-) -> Result<()> {
+) -> Result<usize> {
     let entries =
         fs::read_dir(src_dir).with_context(|| format!("read_dir {src_dir:?}"))?;
+
+    let mut total = 0usize;
 
     for entry in entries {
         let entry = entry?;
@@ -222,38 +234,50 @@ fn copy_dir_recursive(
             continue;
         }
 
-        kept.insert(rel.clone());
-
         if meta.is_dir() {
             if !opts.dry_run {
                 fs::create_dir_all(&dest_child)
                     .with_context(|| format!("create_dir_all {dest_child:?}"))?;
             }
-            copy_dir_recursive(opts, &src_child, &dest_child, rel.clone(), filter, max_size, min_size, report, kept, links)?;
-            apply_dir_meta(opts, &dest_child, &meta)?;
+            let sub_count = copy_dir_recursive(opts, &src_child, &dest_child, rel.clone(), filter, max_size, min_size, report, kept, links)?;
+            if sub_count == 0 && opts.prune_empty_dirs {
+                // Remove the empty directory from dest and don't track it.
+                if !opts.dry_run {
+                    let _ = fs::remove_dir(&dest_child);
+                }
+                // Don't add to kept; skip apply_dir_meta for it.
+            } else {
+                kept.insert(rel.clone());
+                total += 1; // Count the directory as contributing
+                apply_dir_meta(opts, &dest_child, &meta)?;
+            }
         } else {
             // Apply size filters for regular files.
             if meta.is_file() {
                 let file_size = meta.len() as i64;
                 if let Some(max) = max_size {
                     if file_size > max {
-                        kept.remove(&rel);
                         continue;
                     }
                 }
                 if let Some(min) = min_size {
                     if file_size < min {
-                        kept.remove(&rel);
                         continue;
                     }
                 }
             }
+            kept.insert(rel.clone());
             copy_entry(opts, &src_child, &dest_child, &meta, &rel, report, links)?;
+            total += 1;
         }
     }
 
-    apply_dir_meta(opts, dest_dir, &fs::symlink_metadata(src_dir)?)?;
-    Ok(())
+    if !opts.prune_empty_dirs {
+        apply_dir_meta(opts, dest_dir, &fs::symlink_metadata(src_dir)?)?;
+    } else if total > 0 {
+        apply_dir_meta(opts, dest_dir, &fs::symlink_metadata(src_dir)?)?;
+    }
+    Ok(total)
 }
 
 /// Copy a single file/symlink/special; updates stats and verbose output.
@@ -308,6 +332,22 @@ fn copy_entry(
     let dest_meta = fs::symlink_metadata(dest).ok();
     if !opts.checksum && dest_meta_in_sync(dest_meta.as_ref(), meta) {
         return Ok(());
+    }
+
+    // --ignore-existing: skip if dest already exists (regardless of content).
+    if opts.ignore_existing && dest.exists() {
+        return Ok(());
+    }
+
+    // --update: skip if dest is newer than source.
+    if opts.update {
+        if let Some(dm) = dest_meta.as_ref() {
+            if let (Ok(dst_t), Ok(src_t)) = (dm.modified(), meta.modified()) {
+                if dst_t > src_t {
+                    return Ok(());
+                }
+            }
+        }
     }
 
     // Compute itemize iflags for this entry.

@@ -55,6 +55,8 @@ pub struct ServerFlags {
     pub protect_args: bool,
     pub compress: bool,
     pub delete: bool,
+    pub ignore_existing: bool,
+    pub prune_empty_dirs: bool,
     pub max_size: Option<i64>,
     pub min_size: Option<i64>,
     /// Unrecognised characters seen in the bundled token (excluding the
@@ -176,6 +178,7 @@ pub fn parse_server_flags(arg: &str) -> ServerFlags {
             }
             'C' => out.cvs_exclude = true,
             'I' => out.ignore_times = true,
+            'm' => out.prune_empty_dirs = true,
             's' => out.protect_args = true,
             'z' => out.compress = true,
             'e' => {
@@ -211,6 +214,8 @@ where
                 "delete" | "delete-before" | "delete-during" | "delete-after" => {
                     flags.delete = true;
                 }
+                "ignore-existing" => { flags.ignore_existing = true; }
+                "prune-empty-dirs" => { flags.prune_empty_dirs = true; }
                 _ if rest.starts_with("max-size=") => {
                     flags.max_size = crate::util::parse_size_str(&rest["max-size=".len()..]);
                 }
@@ -248,6 +253,8 @@ where
             flags.one_file_system |= f.one_file_system;
             flags.protect_args |= f.protect_args;
             flags.compress |= f.compress;
+            flags.ignore_existing |= f.ignore_existing;
+            flags.prune_empty_dirs |= f.prune_empty_dirs;
             if !f.e_tail.is_empty() {
                 flags.e_tail = f.e_tail;
             }

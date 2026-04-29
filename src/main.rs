@@ -775,7 +775,7 @@ pub fn run_server_io<R: std::io::Read, W: std::io::Write>(
                     root_fi.flags |= crate::protocol::constants::FLAG_TOP_DIR;
                     flist.files.push(root_fi);
                 }
-                walk_source_dir(path, "", recursive, &mut flist, &client_filter, server_flags.max_size, server_flags.min_size);
+                walk_source_dir(path, "", recursive, &mut flist, &client_filter, server_flags.max_size, server_flags.min_size, server_flags.prune_empty_dirs);
             } else if let Ok(meta) = std::fs::metadata(path) {
                 let name =
                     path.file_name().and_then(|n| n.to_str()).unwrap_or(src).to_string();
@@ -886,6 +886,7 @@ pub fn run_server_io<R: std::io::Read, W: std::io::Write>(
         let mut stats = pipeline::receiver::run_server_receiver(
             &mut reader, &mut writer, &flist, dest_dir, rsync_ct, protocol, checksum_seed,
             use_zlib, opts.inplace, opts.itemize_changes, use_checksum,
+            server_flags.update, server_flags.ignore_existing,
             server_flags.max_size, server_flags.min_size,
         )
         .context("server-receiver run")?;
@@ -1106,6 +1107,7 @@ fn run_client(opts: &Options) -> Result<Stats> {
                 walk_source_dir(p, "", recursive, &mut flist, &filter,
                     opts.max_size.as_deref().and_then(crate::util::parse_size_str),
                     opts.min_size.as_deref().and_then(crate::util::parse_size_str),
+                    opts.prune_empty_dirs,
                 );
             }
             crate::flist::flist_sort(&mut flist);
@@ -1308,6 +1310,7 @@ fn run_client_protocol<R: std::io::Read, W: std::io::Write>(
                 walk_source_dir(p, "", recursive, &mut flist, &local_filter,
                     opts.max_size.as_deref().and_then(crate::util::parse_size_str),
                     opts.min_size.as_deref().and_then(crate::util::parse_size_str),
+                    opts.prune_empty_dirs,
                 );
             } else if let Ok(meta) = p.symlink_metadata() {
                 let name =
@@ -1413,6 +1416,7 @@ fn run_client_protocol<R: std::io::Read, W: std::io::Write>(
         let mut stats = pipeline::receiver::run_server_receiver(
             &mut reader, &mut writer, &flist, dest_path, rsync_ct, protocol, checksum_seed,
             use_zlib, opts.inplace, opts.itemize_changes, opts.checksum,
+            opts.update, opts.ignore_existing,
             opts.max_size.as_deref().and_then(crate::util::parse_size_str),
             opts.min_size.as_deref().and_then(crate::util::parse_size_str),
         ).context("client-receiver run")?;
@@ -1511,6 +1515,7 @@ fn walk_source_dir(
     filter: &crate::filter::FilterList,
     max_size: Option<i64>,
     min_size: Option<i64>,
+    prune_empty_dirs: bool,
 ) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -1543,9 +1548,17 @@ fn walk_source_dir(
             }
             flist.files.push(fi);
         } else if ft.is_dir() {
-            flist.files.push(file_info_from_meta(&name, dirname.as_deref(), &meta));
             if recursive {
-                walk_source_dir(&entry.path(), &rel, true, flist, filter, max_size, min_size);
+                let dir_idx = flist.files.len();
+                flist.files.push(file_info_from_meta(&name, dirname.as_deref(), &meta));
+                let before_recurse = flist.files.len();
+                walk_source_dir(&entry.path(), &rel, true, flist, filter, max_size, min_size, prune_empty_dirs);
+                // --prune-empty-dirs: remove the dir entry if nothing was added under it.
+                if prune_empty_dirs && flist.files.len() == before_recurse {
+                    flist.files.remove(dir_idx);
+                }
+            } else {
+                flist.files.push(file_info_from_meta(&name, dirname.as_deref(), &meta));
             }
         } else {
             // Apply --max-size / --min-size filters for regular files.
