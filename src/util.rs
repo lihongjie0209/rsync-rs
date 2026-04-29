@@ -159,6 +159,47 @@ pub fn same_file(_a: &std::fs::Metadata, _b: &std::fs::Metadata) -> bool {
     false
 }
 
+// ── Size parsing ─────────────────────────────────────────────────────────────
+
+/// Parse an rsync `--max-size` / `--min-size` string into bytes.
+///
+/// Accepted formats (case-insensitive suffix):
+///   "1234"   → 1234 bytes
+///   "10k"    → 10 × 1024 = 10240 bytes
+///   "2M"     → 2 × 1024² = 2097152 bytes
+///   "1G"     → 1 × 1024³ bytes
+///   "1T"     → 1 × 1024⁴ bytes
+///   "1.5M"   → 1572864 bytes
+///
+/// Returns `None` if the string cannot be parsed.
+pub fn parse_size_str(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Strip trailing 'b' or 'B' (e.g. "10kb" → "10k")
+    let s = if s.ends_with(['b', 'B']) && s.len() > 1 {
+        &s[..s.len() - 1]
+    } else {
+        s
+    };
+    let multiplier: i64 = match s.chars().last()? {
+        'k' | 'K' => 1024,
+        'm' | 'M' => 1024 * 1024,
+        'g' | 'G' => 1024 * 1024 * 1024,
+        't' | 'T' => 1024 * 1024 * 1024 * 1024,
+        _ => 1,
+    };
+    let num_str = if multiplier == 1 {
+        s
+    } else {
+        &s[..s.len() - 1]
+    };
+    // Parse as f64 to support "1.5M" etc.
+    let val: f64 = num_str.parse().ok()?;
+    Some((val * multiplier as f64) as i64)
+}
+
 // ── Sleep ────────────────────────────────────────────────────────────────────
 
 /// Sleep for `ms` milliseconds.

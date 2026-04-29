@@ -775,7 +775,7 @@ pub fn run_server_io<R: std::io::Read, W: std::io::Write>(
                     root_fi.flags |= crate::protocol::constants::FLAG_TOP_DIR;
                     flist.files.push(root_fi);
                 }
-                walk_source_dir(path, "", recursive, &mut flist, &client_filter);
+                walk_source_dir(path, "", recursive, &mut flist, &client_filter, server_flags.max_size, server_flags.min_size);
             } else if let Ok(meta) = std::fs::metadata(path) {
                 let name =
                     path.file_name().and_then(|n| n.to_str()).unwrap_or(src).to_string();
@@ -886,6 +886,7 @@ pub fn run_server_io<R: std::io::Read, W: std::io::Write>(
         let mut stats = pipeline::receiver::run_server_receiver(
             &mut reader, &mut writer, &flist, dest_dir, rsync_ct, protocol, checksum_seed,
             use_zlib, opts.inplace, opts.itemize_changes, use_checksum,
+            server_flags.max_size, server_flags.min_size,
         )
         .context("server-receiver run")?;
         stats.deleted_files = del_files;
@@ -1102,7 +1103,10 @@ fn run_client(opts: &Options) -> Result<Stats> {
             let mut flist = crate::protocol::types::FileList::new();
             for src in &sources {
                 let p = std::path::Path::new(src);
-                walk_source_dir(p, "", recursive, &mut flist, &filter);
+                walk_source_dir(p, "", recursive, &mut flist, &filter,
+                    opts.max_size.as_deref().and_then(crate::util::parse_size_str),
+                    opts.min_size.as_deref().and_then(crate::util::parse_size_str),
+                );
             }
             crate::flist::flist_sort(&mut flist);
             batch::run_write_batch(opts, &flist, &sources, &batch_path)
@@ -1301,7 +1305,10 @@ fn run_client_protocol<R: std::io::Read, W: std::io::Write>(
                     root_fi.flags |= crate::protocol::constants::FLAG_TOP_DIR;
                     flist.files.push(root_fi);
                 }
-                walk_source_dir(p, "", recursive, &mut flist, &local_filter);
+                walk_source_dir(p, "", recursive, &mut flist, &local_filter,
+                    opts.max_size.as_deref().and_then(crate::util::parse_size_str),
+                    opts.min_size.as_deref().and_then(crate::util::parse_size_str),
+                );
             } else if let Ok(meta) = p.symlink_metadata() {
                 let name =
                     p.file_name().and_then(|n| n.to_str()).unwrap_or(src).to_string();
@@ -1406,6 +1413,8 @@ fn run_client_protocol<R: std::io::Read, W: std::io::Write>(
         let mut stats = pipeline::receiver::run_server_receiver(
             &mut reader, &mut writer, &flist, dest_path, rsync_ct, protocol, checksum_seed,
             use_zlib, opts.inplace, opts.itemize_changes, opts.checksum,
+            opts.max_size.as_deref().and_then(crate::util::parse_size_str),
+            opts.min_size.as_deref().and_then(crate::util::parse_size_str),
         ).context("client-receiver run")?;
         stats.deleted_files = del_files;
         stats.deleted_dirs = del_dirs;
@@ -1500,6 +1509,8 @@ fn walk_source_dir(
     recursive: bool,
     flist: &mut crate::protocol::types::FileList,
     filter: &crate::filter::FilterList,
+    max_size: Option<i64>,
+    min_size: Option<i64>,
 ) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -1534,9 +1545,21 @@ fn walk_source_dir(
         } else if ft.is_dir() {
             flist.files.push(file_info_from_meta(&name, dirname.as_deref(), &meta));
             if recursive {
-                walk_source_dir(&entry.path(), &rel, true, flist, filter);
+                walk_source_dir(&entry.path(), &rel, true, flist, filter, max_size, min_size);
             }
         } else {
+            // Apply --max-size / --min-size filters for regular files.
+            let file_size = meta.len() as i64;
+            if let Some(max) = max_size {
+                if file_size > max {
+                    continue;
+                }
+            }
+            if let Some(min) = min_size {
+                if file_size < min {
+                    continue;
+                }
+            }
             flist.files.push(file_info_from_meta(&name, dirname.as_deref(), &meta));
         }
     }

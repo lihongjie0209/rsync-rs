@@ -33,6 +33,7 @@ Legend: ✅ implemented · ⚠️ partial · ❌ not yet
 | | `--list-only` | ✅ | |
 | | `--help`, `--version` | ✅ | Hand-rolled to mirror C layout |
 | Filters | `--exclude`/`--include`, `--exclude-from` | ✅ basic | No merge-files (`:` per-dir) |
+| | `--max-size`, `--min-size` | ✅ | Applied on generator (receiver) side and sender flist — all directions verified |
 | Platforms | Linux x86_64, aarch64 (gnu+musl) | ✅ | CI build + tests |
 | | macOS x86_64, aarch64 | ✅ | CI build + tests |
 | | Windows x86_64 (MSVC) | ✅ | Local + self-loop daemon work; rsh transport over OpenSSH supported |
@@ -61,6 +62,7 @@ CI matrix per push (`.github/workflows/ci.yml`):
 | `Windows smoke (native)` | rsync-rs ↔ rsync-rs on Windows via local + cwRsync rsh |
 | `Windows smoke (interop)` | rsync-rs ↔ cwRsync (Cygwin C build) on Windows |
 | `Linux interop` | 60 scenarios: local + rsh + daemon + checksum, rs↔rs and rs↔C 3.2.7 — **60/60 pass** |
+| `Linux interop (extended)` | 94 scenarios total incl. --max-size/--min-size filters — **94/94 pass** |
 
 ### Known interop gaps
 

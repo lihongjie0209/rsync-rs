@@ -79,13 +79,17 @@ pub fn run_local(opts: &Options, sources: &[String], dest: &str) -> Result<Local
     let filter = crate::filter::FilterList::from_options(opts)
         .unwrap_or_default();
 
+    // Parse size limits once.
+    let max_size: Option<i64> = opts.max_size.as_deref().and_then(crate::util::parse_size_str);
+    let min_size: Option<i64> = opts.min_size.as_deref().and_then(crate::util::parse_size_str);
+
     // Track everything we actually wrote (relative to dest root) so that
     // --delete can drop the rest.
     let mut kept: HashSet<PathBuf> = HashSet::new();
     let mut links = LinkMap::default();
 
     for src in sources {
-        copy_one(opts, src, &dest_path, dest_is_dir, &filter, &mut report, &mut kept, &mut links)
+        copy_one(opts, src, &dest_path, dest_is_dir, &filter, max_size, min_size, &mut report, &mut kept, &mut links)
             .with_context(|| format!("copying {src}"))?;
     }
 
@@ -103,6 +107,8 @@ fn copy_one(
     dest_root: &Path,
     dest_is_dir: bool,
     filter: &crate::filter::FilterList,
+    max_size: Option<i64>,
+    min_size: Option<i64>,
     report: &mut LocalReport,
     kept: &mut HashSet<PathBuf>,
     links: &mut LinkMap,
@@ -142,13 +148,27 @@ fn copy_one(
             fs::create_dir_all(&into)
                 .with_context(|| format!("create_dir_all {into:?}"))?;
         }
-        copy_dir_recursive(opts, &src_path, &into, PathBuf::new(), filter, report, kept, links)?;
+        copy_dir_recursive(opts, &src_path, &into, PathBuf::new(), filter, max_size, min_size, report, kept, links)?;
         // Keep the dest dir itself.
         if let Ok(rel) = into.strip_prefix(dest_root) {
             kept.insert(rel.to_path_buf());
         }
     } else {
         // Regular file (or symlink/special).  Compute final destination.
+        // Apply size filters for regular files.
+        if meta.is_file() {
+            let file_size = meta.len() as i64;
+            if let Some(max) = max_size {
+                if file_size > max {
+                    return Ok(());
+                }
+            }
+            if let Some(min) = min_size {
+                if file_size < min {
+                    return Ok(());
+                }
+            }
+        }
         let src_basename = src_path
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("source has no basename: {src_path:?}"))?
@@ -177,6 +197,8 @@ fn copy_dir_recursive(
     dest_dir: &Path,
     prefix: PathBuf,
     filter: &crate::filter::FilterList,
+    max_size: Option<i64>,
+    min_size: Option<i64>,
     report: &mut LocalReport,
     kept: &mut HashSet<PathBuf>,
     links: &mut LinkMap,
@@ -207,9 +229,25 @@ fn copy_dir_recursive(
                 fs::create_dir_all(&dest_child)
                     .with_context(|| format!("create_dir_all {dest_child:?}"))?;
             }
-            copy_dir_recursive(opts, &src_child, &dest_child, rel.clone(), filter, report, kept, links)?;
+            copy_dir_recursive(opts, &src_child, &dest_child, rel.clone(), filter, max_size, min_size, report, kept, links)?;
             apply_dir_meta(opts, &dest_child, &meta)?;
         } else {
+            // Apply size filters for regular files.
+            if meta.is_file() {
+                let file_size = meta.len() as i64;
+                if let Some(max) = max_size {
+                    if file_size > max {
+                        kept.remove(&rel);
+                        continue;
+                    }
+                }
+                if let Some(min) = min_size {
+                    if file_size < min {
+                        kept.remove(&rel);
+                        continue;
+                    }
+                }
+            }
             copy_entry(opts, &src_child, &dest_child, &meta, &rel, report, links)?;
         }
     }

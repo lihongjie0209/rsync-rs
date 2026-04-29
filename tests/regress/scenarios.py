@@ -494,6 +494,56 @@ def all_scenarios() -> list[Scenario]:
         verify_dst=_verify_backup_dir_result,
     ))
 
+    # ── 11. --max-size / --min-size: file-size filters ───────────────────────
+    # fx_mixed_sizes() has: zero.bin(0), tiny.txt(1), small.bin(3000),
+    # medium.bin(128k), large.bin(1M).  We use thresholds that put some files
+    # on each side of the cut.
+    _size_present_max  = ["zero.bin", "tiny.txt", "small.bin"]  # ≤ 4k
+    _size_absent_max   = ["medium.bin", "large.bin"]            # > 4k
+    _size_flags_max    = ["-a", "--max-size=4k"]
+
+    _size_present_min  = ["small.bin", "medium.bin", "large.bin"]  # ≥ 1k
+    _size_absent_min   = ["zero.bin", "tiny.txt"]                   # < 1k (0 and 1 byte)
+    _size_flags_min    = ["-a", "--min-size=1k"]
+
+    def _verify_max_size(dst: Path) -> "str | None":
+        missing = [n for n in _size_present_max if not (dst / n).exists()]
+        present = [n for n in _size_absent_max  if (dst / n).exists()]
+        errs = []
+        if missing:
+            errs.append(f"expected small files not synced: {missing}")
+        if present:
+            errs.append(f"large files were synced despite --max-size: {present}")
+        return "; ".join(errs) if errs else None
+
+    def _verify_min_size(dst: Path) -> "str | None":
+        missing = [n for n in _size_present_min if not (dst / n).exists()]
+        present = [n for n in _size_absent_min  if (dst / n).exists()]
+        errs = []
+        if missing:
+            errs.append(f"expected large files not synced: {missing}")
+        if present:
+            errs.append(f"small files were synced despite --min-size: {present}")
+        return "; ".join(errs) if errs else None
+
+    sc.append(_local_only("local__max_size__a", fx_mixed_sizes(), _size_flags_max,
+                          ignore_paths=_size_absent_max, verify_dst=_verify_max_size))
+    sc.append(_c_pulls("c_pulls__max_size__a", fx_mixed_sizes(), _size_flags_max,
+                       ignore_paths=_size_absent_max, verify_dst=_verify_max_size))
+    sc.append(_rs_pulls_c("rs_pulls_c__max_size__a", fx_mixed_sizes(), _size_flags_max,
+                          ignore_paths=_size_absent_max, verify_dst=_verify_max_size))
+    sc.append(_rs_pushes_c("rs_pushes_c__max_size__a", fx_mixed_sizes(), _size_flags_max,
+                           ignore_paths=_size_absent_max, verify_dst=_verify_max_size))
+
+    sc.append(_local_only("local__min_size__a", fx_mixed_sizes(), _size_flags_min,
+                          ignore_paths=_size_absent_min, verify_dst=_verify_min_size))
+    sc.append(_c_pulls("c_pulls__min_size__a", fx_mixed_sizes(), _size_flags_min,
+                       ignore_paths=_size_absent_min, verify_dst=_verify_min_size))
+    sc.append(_rs_pulls_c("rs_pulls_c__min_size__a", fx_mixed_sizes(), _size_flags_min,
+                          ignore_paths=_size_absent_min, verify_dst=_verify_min_size))
+    sc.append(_rs_pushes_c("rs_pushes_c__min_size__a", fx_mixed_sizes(), _size_flags_min,
+                           ignore_paths=_size_absent_min, verify_dst=_verify_min_size))
+
     return sc
 
 

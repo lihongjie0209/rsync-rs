@@ -55,6 +55,8 @@ pub struct ServerFlags {
     pub protect_args: bool,
     pub compress: bool,
     pub delete: bool,
+    pub max_size: Option<i64>,
+    pub min_size: Option<i64>,
     /// Unrecognised characters seen in the bundled token (excluding the
     /// `-e` extension tail, which is consumed silently).
     pub unknown: String,
@@ -208,6 +210,12 @@ where
                 "numeric-ids" => { /* doesn't affect preserve booleans */ }
                 "delete" | "delete-before" | "delete-during" | "delete-after" => {
                     flags.delete = true;
+                }
+                _ if rest.starts_with("max-size=") => {
+                    flags.max_size = crate::util::parse_size_str(&rest["max-size=".len()..]);
+                }
+                _ if rest.starts_with("min-size=") => {
+                    flags.min_size = crate::util::parse_size_str(&rest["min-size=".len()..]);
                 }
                 _ => {}
             }

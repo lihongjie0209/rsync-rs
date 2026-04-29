@@ -201,6 +201,8 @@ pub fn run_server_receiver<R: Read, W: Write>(
     inplace: bool,
     itemize: bool,
     use_checksum: bool,
+    max_size: Option<i64>,
+    min_size: Option<i64>,
 ) -> Result<Stats> {
     use crate::delta::match_blocks::{write_sum_bufs, write_sum_head};
     use crate::fileops::slurp_file;
@@ -235,6 +237,19 @@ pub fn run_server_receiver<R: Read, W: Write>(
             continue;
         }
         let dest_path = dest_dir.join(fi.path());
+
+        // Apply --max-size / --min-size on the generator (receiver) side.
+        let file_size = fi.size as i64;
+        if let Some(max) = max_size {
+            if file_size > max {
+                continue;
+            }
+        }
+        if let Some(min) = min_size {
+            if file_size < min {
+                continue;
+            }
+        }
 
         // Quick check: skip if size + mtime match AND not using --checksum.
         // With --checksum, we always request the file so the sender can do a

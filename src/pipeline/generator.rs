@@ -53,6 +53,8 @@ impl<R: Read, W: Write> Generator<R, W> {
         csum_type: CsumType,
         protocol: u32,
         checksum_whole_file: bool,
+        max_size: Option<i64>,
+        min_size: Option<i64>,
     ) -> Result<()> {
         let sum_len = super::csum_sum_len(csum_type);
 
@@ -64,6 +66,20 @@ impl<R: Read, W: Write> Generator<R, W> {
             // all transfers are complete.
             if fi.hard_link_first_ndx >= 0 {
                 continue;
+            }
+
+            // Apply --max-size / --min-size on the generator (receiver) side,
+            // mirroring C rsync's generator.c behaviour.
+            let file_size = fi.size as i64;
+            if let Some(max) = max_size {
+                if file_size > max {
+                    continue;
+                }
+            }
+            if let Some(min) = min_size {
+                if file_size < min {
+                    continue;
+                }
             }
 
             let should_transfer = checksum_whole_file || Self::needs_update(fi, dest_dir);
